@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
-    <meta name="theme-color" content="#131510" />
+    <meta name="theme-color" content="#000000" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Grok Remote" />
@@ -14,8 +14,6 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <div class="scanlines" aria-hidden="true"></div>
-
     <header class="topbar" data-kind="home">
       <button class="topbar-panel-btn topbar-panel-btn--left" id="topbar-sidebar-left" type="button" title="toggle conversations sidebar" aria-label="toggle conversations sidebar" hidden></button>
       <button class="hamburger" id="hamburger-btn" type="button" aria-label="Open conversations" aria-expanded="false">
@@ -23,18 +21,13 @@
       </button>
       <div class="topbar-identity">
         <a class="brand-mark-link" id="brand-link" href="#/" title="Grok Remote home" aria-label="Grok Remote home">
-          <span class="brand-mark">G</span>
+          <span class="brand-mark">Grok</span>
         </a>
         <div class="topbar-copy">
           <div class="topbar-title-row" id="topbar-title-row">
-            <button class="topbar-title" id="topbar-title" type="button" disabled>Grok Remote</button>
-            <span class="topbar-title-chevron" aria-hidden="true">›</span>
+            <button class="topbar-title" id="topbar-title" type="button" disabled>Grok</button>
           </div>
           <div class="topbar-meta" id="topbar-meta" hidden>
-            <span class="topbar-live" id="topbar-live" hidden>
-              <span class="topbar-live-dot" id="topbar-live-dot"></span>
-              <span class="topbar-live-label" id="topbar-live-label"></span>
-            </span>
             <span class="topbar-model" id="topbar-model" hidden></span>
             <button class="topbar-cwd" id="topbar-cwd" type="button" hidden>
               <span class="topbar-cwd-path" id="topbar-cwd-path"></span>
@@ -43,20 +36,14 @@
         </div>
       </div>
       <div class="topbar-right">
-        <div class="status status--idle" id="status" title="probing tailnet">
+        <button class="topbar-live" id="topbar-live" type="button" hidden>
+          <span class="topbar-live-dot" id="topbar-live-dot"></span>
+          <span class="topbar-live-label" id="topbar-live-label"></span>
+        </button>
+        <div class="status status--idle" id="status" title="probing api">
           <span class="status-dot status-dot--idle" id="status-pill"></span>
-          <span class="status-text" id="status-text">probing tailnet</span>
+          <span class="status-text" id="status-text">probing</span>
         </div>
-        <button class="topbar-bg" id="topbar-bg" type="button" hidden title="background processes (npm run dev, etc.)">
-          <span class="topbar-bg__dot"></span>
-          <span class="topbar-bg__count">bg: 0</span>
-        </button>
-        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="cycle theme" title="cycle theme">
-          <span class="theme-toggle-dot" id="theme-toggle-dot" aria-hidden="true"></span>
-          <span class="theme-toggle-label" id="theme-toggle-label">dark</span>
-        </button>
-        <button class="topbar-icon-btn" id="open-settings" title="App settings" aria-label="App settings"></button>
-        <button class="topbar-panel-btn topbar-panel-btn--right" id="topbar-sidebar-right" type="button" title="toggle tool calls panel" aria-label="toggle tool calls panel" hidden></button>
       </div>
     </header>
 

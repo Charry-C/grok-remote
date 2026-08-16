@@ -49,7 +49,7 @@ test('writeHeaders sets the SSE content type and pushes the retry hint', () => {
   assert.equal(res.headers && res.headers['Cache-Control'], 'no-cache, no-transform');
   assert.equal(res.headers && res.headers['Connection'], 'keep-alive');
   assert.equal(res.headers && res.headers['X-Accel-Buffering'], 'no');
-  assert.equal(res.chunks.join(''), 'retry: 5000\n\n');
+  assert.equal(res.chunks.join(''), 'retry: 2000\n\n');
   assert.equal(res.flushed, true);
 });
 
@@ -115,6 +115,19 @@ test('writeEvent returns false and writes nothing when the response is already c
   const destroyed = makeRes({ destroyed: true });
   assert.equal(writeEvent(destroyed as unknown as ServerResponse, { data: 'x' }), false);
   assert.deepEqual(destroyed.chunks, []);
+});
+
+test('writeEvent still returns true when the socket is only backpressured', () => {
+  // res.write() === false means the kernel buffer is full, not that the
+  // client is gone. Hanging up here is what produced mid-turn stream errors.
+  const res = makeRes({
+    write(s: string): boolean {
+      this.chunks.push(s);
+      return false;
+    },
+  });
+  assert.equal(writeEvent(res as unknown as ServerResponse, { event: 'tick', data: 'x' }), true);
+  assert.equal(res.chunks.join(''), 'event: tick\ndata: x\n\n');
 });
 
 test('writePing emits the SSE comment heartbeat', () => {

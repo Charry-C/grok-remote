@@ -51,25 +51,25 @@ interface HistoryEntry {
 }
 
 export function register(add: RouteRegistrar): void {
-  add('GET',  '/api/system/skills',                 listHandler);
-  add('GET',  '/api/system/skills/read',            readHandler);
-  add('POST', '/api/system/skills/archive',         archiveHandler);
-  add('POST', '/api/system/skills/restore',         restoreHandler);
-  add('POST', '/api/system/skills/move',            moveHandler);
-  add('PUT',  '/api/system/skills/content',         saveContentHandler);
-  add('GET',  '/api/system/skills/history',         historyListHandler);
-  add('GET',  '/api/system/skills/history/content', historySnapshotHandler);
-  add('POST', '/api/system/skills/history/restore', historyRestoreHandler);
-  add('POST', '/api/system/skills/use',             useHandler);
-  add('GET',  '/api/system/skills/usage',           usageHandler);
+  add('GET',  '/api/system/skills', listHandler);
 }
 
 function isNodeErr(err: unknown): err is NodeJS.ErrnoException {
   return typeof err === 'object' && err !== null && 'code' in (err as object);
 }
 
-function activeSources(): { scope: SkillScope; dir: string }[] {
-  const cwd = process.cwd();
+function hostCwd(req?: IncomingMessage): string {
+  if (req) {
+    try {
+      const q = new URL(req.url || '/', 'http://x').searchParams.get('cwd');
+      if (q && q.trim()) return q.trim();
+    } catch { /* ignore */ }
+  }
+  return process.cwd();
+}
+
+function activeSources(baseCwd?: string): { scope: SkillScope; dir: string }[] {
+  const cwd = (baseCwd && baseCwd.trim()) || process.cwd();
   const home = os.homedir();
   const repo = findRepoRoot(cwd);
   const sources: SkillSource[] = [
@@ -84,8 +84,8 @@ function activeSources(): { scope: SkillScope; dir: string }[] {
     arr.findIndex((x) => path.resolve(x.dir) === path.resolve(s.dir)) === i);
 }
 
-function allScopes(): { scope: SkillScope; dir: string }[] {
-  const cwd = process.cwd();
+function allScopes(baseCwd?: string): { scope: SkillScope; dir: string }[] {
+  const cwd = (baseCwd && baseCwd.trim()) || process.cwd();
   const home = os.homedir();
   const repo = findRepoRoot(cwd);
   const sources: SkillSource[] = [
@@ -111,7 +111,7 @@ function archiveDirForScope(scope: string): string | null {
 function listHandler(req: IncomingMessage, res: ServerResponse): void {
   const urlObj = new URL(req.url || '/', 'http://x');
   const includeArchived = urlObj.searchParams.get('includeArchived') === '1';
-  const sources = activeSources();
+  const sources = activeSources(hostCwd(req));
   const usage = readUsageMap();
 
   const skills: SkillRecord[] = [];

@@ -11,6 +11,8 @@ export interface TokenMeta {
   cachedReadTokens?: number; cached_read_tokens?: number; cachedTokens?: number;
   reasoningTokens?: number; reasoning_tokens?: number;
   totalTokens?: number | null; total_tokens?: number | null;
+  costUsdTicks?: number; cost_usd_ticks?: number; total_cost_usd_ticks?: number;
+  costUSD?: number; costUsd?: number; cost_usd?: number; total_cost_usd?: number;
   modelId?: string | null; model_id?: string | null; model?: string | null;
   stopReason?: string | null; stop_reason?: string | null;
 }
@@ -80,6 +82,12 @@ export function extractTokenMeta(payload: unknown): TokenMeta | null {
     if (out.totalTokens == null) {
       out.totalTokens = pickNum(layer, 'totalTokens', 'total_tokens');
     }
+    if (out.costUsdTicks == null) {
+      out.costUsdTicks = pickNum(layer, 'costUsdTicks', 'cost_usd_ticks', 'total_cost_usd_ticks');
+    }
+    if (out.costUSD == null) {
+      out.costUSD = pickNum(layer, 'costUSD', 'costUsd', 'cost_usd', 'total_cost_usd');
+    }
     if (out.modelId == null) {
       out.modelId = pickStr(layer, 'modelId', 'model_id', 'model') ?? null;
     }
@@ -88,7 +96,7 @@ export function extractTokenMeta(payload: unknown): TokenMeta | null {
     }
   }
 
-  if (!hasTokenUsage(out) && out.totalTokens == null && !out.modelId && !out.stopReason) {
+  if (!hasTurnLedger(out) && out.totalTokens == null && !out.modelId && !out.stopReason) {
     return null;
   }
   return out;
@@ -103,6 +111,19 @@ export function hasTokenUsage(meta: TokenMeta | null | undefined): boolean {
     meta.reasoningTokens, meta.reasoning_tokens,
   ];
   return vals.some((v) => typeof v === 'number' && Number.isFinite(v));
+}
+
+export function hasCost(meta: TokenMeta | null | undefined): boolean {
+  if (!meta) return false;
+  const ticks = meta.costUsdTicks ?? meta.cost_usd_ticks ?? meta.total_cost_usd_ticks;
+  const usd = meta.costUSD ?? meta.costUsd ?? meta.cost_usd ?? meta.total_cost_usd;
+  return (typeof ticks === 'number' && Number.isFinite(ticks))
+    || (typeof usd === 'number' && Number.isFinite(usd));
+}
+
+/** True when the payload has anything worth painting on the turn footer. */
+export function hasTurnLedger(meta: TokenMeta | null | undefined): boolean {
+  return hasTokenUsage(meta) || hasCost(meta);
 }
 
 export function mergeTokenMeta(

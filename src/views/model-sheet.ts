@@ -2,7 +2,12 @@
 
 import { api } from '../lib/api.js';
 import { el } from '../lib/render.js';
-import { REASONING_EFFORTS, prettyModelId } from '../lib/model-label.js';
+import {
+  clampReasoningEffort,
+  effortsForModel,
+  modelSupportsEffort,
+  prettyModelId,
+} from '../lib/model-label.js';
 
 export interface ModelChoice {
   model: string;
@@ -33,6 +38,9 @@ export async function openModelSheet(opts: OpenModelSheetOpts): Promise<void> {
 
   let currentModel = (opts.currentModel || '').trim();
   let currentEffort = (opts.currentEffort || '').trim();
+  if (currentEffort && !modelSupportsEffort(currentModel, currentEffort)) {
+    currentEffort = clampReasoningEffort(currentModel, currentEffort);
+  }
   const names = new Map<string, string>();
   let applied = false;
 
@@ -40,6 +48,7 @@ export async function openModelSheet(opts: OpenModelSheetOpts): Promise<void> {
     if (applied) return;
     if (next.model != null) currentModel = String(next.model).trim();
     if (next.reasoningEffort != null) currentEffort = String(next.reasoningEffort).trim();
+    if (currentEffort) currentEffort = clampReasoningEffort(currentModel, currentEffort);
     const displayName = next.displayName
       || names.get(currentModel)
       || prettyModelId(currentModel)
@@ -61,13 +70,18 @@ export async function openModelSheet(opts: OpenModelSheetOpts): Promise<void> {
 
   const paintEffort = (): void => {
     effortRow.replaceChildren();
-    for (const e of REASONING_EFFORTS) {
+    const options = effortsForModel(currentModel);
+    const highlight = currentEffort && !modelSupportsEffort(currentModel, currentEffort)
+      ? clampReasoningEffort(currentModel, currentEffort)
+      : currentEffort;
+    for (const e of options) {
       effortRow.appendChild(el('button', {
-        class: `model-sheet__effort-btn${e.id === currentEffort ? ' is-on' : ''}`,
+        class: `model-sheet__effort-btn${e.id === highlight ? ' is-on' : ''}`,
         type: 'button',
         onclick: () => apply({ reasoningEffort: e.id }),
       }, e.label));
     }
+    effortRow.hidden = options.length === 0;
   };
   paintEffort();
 

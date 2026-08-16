@@ -45,17 +45,37 @@ test('parseUpdatesJsonl coalesces chunks into user/assistant turns and keeps too
     'user_message',
     'agent_thought_chunk',
     'agent_message_chunk',
+    'turn_completed',
     'user_message',
     'tool_call',
     'tool_call_update',
     'agent_message_chunk',
+    'turn_completed',
   ]);
   assert.equal(events[0]?.data['text'], 'hello');
   assert.equal(events[1]?.data['text'], 'thinking now');
   assert.equal(events[2]?.data['text'], 'hi');
-  assert.equal(events[3]?.data['text'], 'second');
-  const tool = events[4]?.data['update'] as { toolCallId?: string };
+  assert.equal(events[3]?.event, 'turn_completed');
+  assert.equal(events[4]?.data['text'], 'second');
+  const tool = events[5]?.data['update'] as { toolCallId?: string };
   assert.equal(tool && tool.toolCallId, 't1');
+});
+
+test('parseUpdatesJsonl keeps turn_completed.usage for the token footer', () => {
+  const raw = [
+    updateLine('user_message_chunk', { content: { type: 'text', text: 'hi' } }, 1000),
+    updateLine('agent_message_chunk', { content: { type: 'text', text: 'yo' } }, 1001),
+    updateLine('turn_completed', {
+      stop_reason: 'end_turn',
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costUsdTicks: 126890500 },
+    }, 1002),
+  ].join('\n') + '\n';
+  const events = parseUpdatesJsonl(raw, 'sid-usage');
+  const done = events.find((e) => e.event === 'turn_completed');
+  assert.ok(done);
+  const usage = done!.data['usage'] as { inputTokens?: number; costUsdTicks?: number };
+  assert.equal(usage && usage.inputTokens, 10);
+  assert.equal(usage && usage.costUsdTicks, 126890500);
 });
 
 test('liveEventFromUpdateRow passes through chunk text for the live tail path', () => {

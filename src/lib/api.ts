@@ -158,9 +158,10 @@ export const api = {
   },
 
   skills: {
-    list: (opts?: { includeArchived?: boolean }): Promise<unknown> => {
+    list: (opts?: { includeArchived?: boolean; cwd?: string }): Promise<unknown> => {
       const qs = new URLSearchParams();
       if (opts && opts.includeArchived) qs.set('includeArchived', '1');
+      if (opts && opts.cwd) qs.set('cwd', String(opts.cwd));
       const tail = qs.toString();
       return request('GET', `/api/system/skills${tail ? `?${tail}` : ''}`);
     },

@@ -5,8 +5,7 @@ import type { ChildProcess } from 'node:child_process';
 import { ENABLED, SKIP_REASON, bootServer, shutdown } from './_helpers.js';
 
 // Phase 9 — more public endpoints. Read-only probes only; nothing in here
-// mutates user state (no PATCH /api/settings, no agent spawns, no grok bin
-// calls beyond what /api/system/health reads).
+// mutates user state (no PATCH /api/settings, no agent spawns).
 
 test('integration: GET /api/agents returns an array of agent records', { skip: !ENABLED && SKIP_REASON }, async () => {
   let proc: ChildProcess | null = null;
@@ -103,27 +102,15 @@ test('integration: /api/agents/stream opens an SSE stream and sends at least one
   }
 });
 
-test('integration: GET /api/system/health returns version + update + server blocks', { skip: !ENABLED && SKIP_REASON }, async () => {
-  // /api/system/health combines `grok version`, an update check, and a
-  // server info block. The grok-dependent fields may carry errors when the
-  // CLI isn't logged in — we only assert the envelope shape, not contents.
+test('integration: GET /api/system/skills returns a skills envelope', { skip: !ENABLED && SKIP_REASON }, async () => {
   let proc: ChildProcess | null = null;
   try {
     const s = await bootServer();
     proc = s.proc;
-    const r = await fetch(`${s.base}/api/system/health`);
-    // Endpoint should return 200 even when sub-tasks fail (they fold into
-    // *Error fields on the response).
+    const r = await fetch(`${s.base}/api/system/skills`);
     assert.equal(r.status, 200);
-    const body = await r.json() as Record<string, unknown>;
-    assert.equal(typeof body, 'object');
-    assert.notEqual(body, null);
-    // server block is always populated locally.
-    const server = body['server'] as { node?: unknown; platform?: unknown; uptimeSeconds?: unknown } | undefined;
-    assert.equal(typeof server, 'object');
-    assert.equal(typeof server?.node, 'string');
-    assert.equal(typeof server?.platform, 'string');
-    assert.equal(typeof server?.uptimeSeconds, 'number');
+    const body = await r.json() as { skills?: unknown };
+    assert.ok(Array.isArray(body.skills), 'expected skills array');
   } finally {
     await shutdown(proc);
   }

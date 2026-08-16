@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   extractTokenMeta,
   hasTokenUsage,
+  hasCost,
+  hasTurnLedger,
   mergeTokenMeta,
   isTurnCompletedPayload,
 } from '../src/lib/token-usage.js';
@@ -134,6 +136,31 @@ test('mergeTokenMeta lets a later ledger overwrite earlier chips', () => {
   assert.equal(merged.inputTokens, 15559);
   assert.equal(merged.outputTokens, 215);
   assert.equal(merged.reasoningTokens, 82);
+});
+
+test('extractTokenMeta reads costUsdTicks from turn_completed usage', () => {
+  const meta = extractTokenMeta({
+    sessionUpdate: 'turn_completed',
+    usage: {
+      inputTokens: 812,
+      outputTokens: 210,
+      totalTokens: 1022,
+      costUsdTicks: 126890500,
+    },
+  });
+  assert.ok(meta);
+  assert.equal(meta!.costUsdTicks, 126890500);
+  assert.equal(hasCost(meta), true);
+  assert.equal(hasTurnLedger(meta), true);
+});
+
+test('hasCost and hasTurnLedger treat cost-only payloads as a ledger', () => {
+  assert.equal(hasCost({ costUsdTicks: 0 }), true);
+  assert.equal(hasCost({ costUSD: 0.0127 }), true);
+  assert.equal(hasCost({ stopReason: 'end_turn' }), false);
+  assert.equal(hasTurnLedger({ costUsdTicks: 1 }), true);
+  assert.equal(hasTurnLedger({ inputTokens: 1 }), true);
+  assert.equal(hasTurnLedger({ stopReason: 'end_turn' }), false);
 });
 
 test('isTurnCompletedPayload ignores other x.ai session updates', () => {

@@ -342,6 +342,14 @@ Query:
 
 There is no `GET /api/models`. Per-conversation switch is `POST /api/agents/:id/model`.
 
+## Skills (slash palette)
+
+| Method | Path | Notes |
+| ------ | ---- | ----- |
+| GET | `/api/system/skills` | Read-only list from the TUI host. `?cwd=` is the conversation working directory (cwd + repo `.grok/skills`). Always includes `~/.grok/skills`. |
+
+The `/` palette merges this list with ACP `available_commands_update`. There is no skills management API in the mobile remote.
+
 ## Settings
 
 | Method | Path | Body |
@@ -383,18 +391,16 @@ History reload: `GET /api/agents/:id/history` (prefer `X-History-Source: tui`). 
 
 When `heldBy === "tui"`: composer is read-only, connect/prompt/model are blocked, toast the 409 error. Status is `observed` / “watching TUI”.
 
-Sidebar is the main list (`GET /api/agents` + `/api/agents/stream`). Rows are overlay UUIDs. Sessions is search/debug (`GET /api/system/sessions`), not a second primary list.
+Sidebar is the main list (`GET /api/agents` + `/api/agents/stream`). Rows are overlay UUIDs. Import sheet is search/debug (`GET /api/system/sessions`), not a second primary list.
 
 Sidebar shows:
 - name (editable)
-- model
 - status dot (idle / running / errored / disconnected / observed)
 - last activity
 - star / archive / delete-forever (overlay; optional TUI delete)
+- folders (drag/drop; system Archived folder)
 
-Settings: default model, default cwd, auto-approve, overlay retention (days), color theme. Models page uses `GET /api/system/models`.
-
-The conversation **Flow** tab (`src/views/system/flow.tsx`, React / xyflow) graphs this chat only. Keep it.
+There is no Settings page, Files tab, Flow tab, or Trace tab in the mobile remote. `defaultCwd` is set from the cwd sheet (tap / long-press `+ New`). Theme is Dark / Light in the sidebar. Model switch is the composer Model sheet (`GET /api/system/models` + `POST /api/agents/:id/model`).
 
 ---
 

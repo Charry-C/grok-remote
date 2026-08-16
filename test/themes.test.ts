@@ -31,10 +31,7 @@ const themes = await import('../src/lib/themes.js');
 
 test('THEMES exposes the registered themes', () => {
   const names = themes.THEMES.map((t) => t.name).sort();
-  assert.deepEqual(names, [
-    'aurora', 'carbon', 'dark', 'hacker', 'light',
-    'midnight', 'mocha', 'nebula', 'sunset', 'unicorn',
-  ]);
+  assert.deepEqual(names, ['dark', 'light']);
 });
 
 test('every theme declares a chrome color (PWA window / browser titlebar)', () => {
@@ -50,8 +47,8 @@ test('getTheme returns the default when no value is stored', () => {
 
 test('getTheme returns the stored value when it is a known theme', () => {
   store.clear();
-  store.set('grok-remote.theme', 'hacker');
-  assert.equal(themes.getTheme(), 'hacker');
+  store.set('grok-remote.theme', 'light');
+  assert.equal(themes.getTheme(), 'light');
 });
 
 test('getTheme falls back to default when the stored value is unknown', () => {
@@ -70,10 +67,20 @@ test('setTheme persists known themes and rejects unknowns by falling back to def
 });
 
 test('applyTheme writes the data-theme attribute on documentElement', () => {
-  themes.applyTheme('hacker');
-  assert.equal(docDataset.theme, 'hacker');
-  themes.applyTheme('unicorn');
-  assert.equal(docDataset.theme, 'unicorn');
+  themes.applyTheme('dark');
+  assert.equal(docDataset.theme, 'dark');
+  themes.applyTheme('light');
+  assert.equal(docDataset.theme, 'light');
+});
+
+test('applyTheme sets color-scheme when style is available', () => {
+  const style: { colorScheme?: string } = {};
+  (globalThis as unknown as { document: { documentElement: { dataset: Record<string, string>; style: typeof style } } })
+    .document.documentElement.style = style;
+  themes.applyTheme('light');
+  assert.equal(style.colorScheme, 'light');
+  themes.applyTheme('dark');
+  assert.equal(style.colorScheme, 'dark');
 });
 
 test('applyTheme normalizes unknown themes to default before writing', () => {
@@ -84,23 +91,15 @@ test('applyTheme normalizes unknown themes to default before writing', () => {
 test('nextTheme cycles through the registry in declaration order', () => {
   store.clear();
   store.set('grok-remote.theme', 'dark');
-  assert.equal(themes.nextTheme('dark'),     'light');
-  assert.equal(themes.nextTheme('light'),    'hacker');
-  assert.equal(themes.nextTheme('hacker'),   'unicorn');
-  assert.equal(themes.nextTheme('unicorn'),  'nebula');
-  assert.equal(themes.nextTheme('nebula'),   'aurora');
-  assert.equal(themes.nextTheme('aurora'),   'sunset');
-  assert.equal(themes.nextTheme('sunset'),   'midnight');
-  assert.equal(themes.nextTheme('midnight'), 'carbon');
-  assert.equal(themes.nextTheme('carbon'),   'mocha');
-  assert.equal(themes.nextTheme('mocha'),    'dark');
+  assert.equal(themes.nextTheme('dark'),  'light');
+  assert.equal(themes.nextTheme('light'), 'dark');
 });
 
 test('getThemeMeta returns the matching theme record', () => {
-  const meta = themes.getThemeMeta('hacker');
-  assert.equal(meta.name, 'hacker');
-  assert.equal(meta.label, 'hacker');
-  assert.equal(meta.accent, '#00ff41');
+  const meta = themes.getThemeMeta('dark');
+  assert.equal(meta.name, 'dark');
+  assert.equal(meta.label, 'dark');
+  assert.equal(meta.accent, '#f4f4f5');
 });
 
 test('getThemeMeta falls back to the first theme for unknown names', () => {

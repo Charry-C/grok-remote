@@ -34,10 +34,11 @@ type Turn = {
   thought: string;
   assistant: string;
   tools: HistoryEvent[];
+  completed: HistoryEvent | null;
 };
 
 function emptyTurn(): Turn {
-  return { at: new Date().toISOString(), user: '', thought: '', assistant: '', tools: [] };
+  return { at: new Date().toISOString(), user: '', thought: '', assistant: '', tools: [], completed: null };
 }
 
 export function grokHome(): string {
@@ -229,6 +230,11 @@ function applyUpdateRow(
       data: { update, _meta: params['_meta'] || null, sessionId },
     });
   } else if (kind === 'turn_completed' || method.endsWith('prompt_complete')) {
+    // Keep the usage ledger on the turn so history replay can paint the
+    // per-turn footer. `update` is the ACP sessionUpdate object (has `.usage`).
+    if (kind === 'turn_completed' || (update && Object.keys(update).length)) {
+      cur.completed = { at, event: 'turn_completed', data: update };
+    }
     flush();
   }
 }
@@ -240,6 +246,7 @@ function turnsToEvents(turns: Turn[]): HistoryEvent[] {
     if (t.thought) events.push({ at: t.at, event: 'agent_thought_chunk', data: { text: t.thought } });
     events.push(...t.tools);
     if (t.assistant) events.push({ at: t.at, event: 'agent_message_chunk', data: { text: t.assistant } });
+    if (t.completed) events.push(t.completed);
   }
   return events;
 }

@@ -1,18 +1,9 @@
-// Dispatcher for /api/system/* routes.
+// Dispatcher for leftover /api/system/* routes used by the chat remote.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import * as mcpRoutes        from './system/mcp.js';
-import * as lspRoutes        from './system/lsp.js';
-import * as leadersRoutes    from './system/leaders.js';
-import * as worktreesRoutes  from './system/worktrees.js';
-import * as memoryRoutes     from './system/memory.js';
-import * as modelsRoutes     from './system/models.js';
-import * as healthRoutes     from './system/health.js';
-import * as importRoutes     from './system/import.js';
-import * as setupRoutes      from './system/setup.js';
-import * as skillsRoutes     from './system/skills.js';
-import * as agentsRoutes     from './system/agents.js';
+import * as modelsRoutes   from './system/models.js';
+import * as skillsRoutes   from './system/skills.js';
 
 export type RouteParams = Record<string, string>;
 export type RouteHandler = (
@@ -39,17 +30,8 @@ function add(method: string, path: string, handler: RouteHandler): void {
 }
 
 const REGISTRARS: RouteModule[] = [
-  mcpRoutes as RouteModule,
-  lspRoutes as RouteModule,
-  leadersRoutes as RouteModule,
-  worktreesRoutes as RouteModule,
-  memoryRoutes as RouteModule,
   modelsRoutes as RouteModule,
-  healthRoutes as RouteModule,
-  importRoutes as RouteModule,
-  setupRoutes as RouteModule,
   skillsRoutes as RouteModule,
-  agentsRoutes as RouteModule,
 ];
 for (const mod of REGISTRARS) {
   if (mod && typeof mod.register === 'function') mod.register(add);
@@ -78,7 +60,6 @@ export async function handleSystem(req: IncomingMessage, res: ServerResponse, ur
     if (params) {
       try {
         const urlObj = new URL(req.url || '/', 'http://x');
-        void urlObj.searchParams;
         await handler(req, res, urlObj, params);
       } catch (err) {
         if (!res.headersSent) {
@@ -89,31 +70,25 @@ export async function handleSystem(req: IncomingMessage, res: ServerResponse, ur
       return true;
     }
   }
-
-  send(res, 404, { ok: false, error: `unknown system route: ${method} ${url}` });
-  return true;
+  send(res, 404, { ok: false, error: 'not found' });
+  return false;
 }
 
-function splitKey(k: string): [string, string] {
-  const i = k.indexOf(' ');
-  return [k.slice(0, i), k.slice(i + 1)];
+function splitKey(key: string): [string, string] {
+  const i = key.indexOf(' ');
+  return [key.slice(0, i), key.slice(i + 1)];
 }
 
 function matchPattern(pattern: string, url: string): RouteParams | null {
-  if (!pattern.includes(':')) return null;
-  const p = pattern.split('/');
-  const u = url.split('/');
+  const p = pattern.split('/').filter(Boolean);
+  const u = url.split('/').filter(Boolean);
   if (p.length !== u.length) return null;
   const params: RouteParams = {};
   for (let i = 0; i < p.length; i++) {
-    const piece = p[i];
-    const upiece = u[i];
-    if (piece === undefined || upiece === undefined) return null;
-    if (piece.startsWith(':')) {
-      params[piece.slice(1)] = decodeURIComponent(upiece);
-    } else if (piece !== upiece) {
-      return null;
-    }
+    const part = p[i] || '';
+    const got = u[i] || '';
+    if (part.startsWith(':')) params[part.slice(1)] = decodeURIComponent(got);
+    else if (part !== got) return null;
   }
   return params;
 }

@@ -7,6 +7,8 @@ import {
   shortModel,
   formatCwd,
   liveFromAgent,
+  connectionActionFor,
+  connectionConfirmFor,
   contextFromAgent,
   documentTitleFor,
   pageTitle,
@@ -51,16 +53,37 @@ test('formatCwd ellipsizes long paths but keeps the last two segments', () => {
 });
 
 test('liveFromAgent maps status and in-flight to a labeled chip', () => {
-  assert.deepEqual(liveFromAgent({ status: 'errored' }), { kind: 'fail', label: 'errored' });
-  assert.deepEqual(liveFromAgent({ status: 'killed' }), { kind: 'fail', label: 'killed' });
+  assert.deepEqual(liveFromAgent({ status: 'errored' }), { kind: 'fail', label: 'error' });
+  assert.deepEqual(liveFromAgent({ status: 'killed' }), { kind: 'fail', label: 'error' });
   assert.deepEqual(liveFromAgent({ status: 'disconnected' }), { kind: 'warn', label: 'offline' });
   assert.deepEqual(liveFromAgent({ status: 'exited' }), { kind: 'warn', label: 'offline' });
-  assert.deepEqual(liveFromAgent({ status: 'starting' }), { kind: 'idle', label: 'starting' });
   assert.deepEqual(liveFromAgent({ status: 'running' }), { kind: 'run', label: 'running' });
   assert.deepEqual(liveFromAgent({ status: 'idle', inFlight: 2 }), { kind: 'run', label: 'working' });
   assert.deepEqual(liveFromAgent({ status: 'idle', connected: true }), { kind: 'ok', label: 'connected' });
   assert.deepEqual(liveFromAgent({ connected: true }), { kind: 'ok', label: 'connected' });
+  assert.deepEqual(liveFromAgent({ heldBy: 'tui', connected: true }), { kind: 'warn', label: 'TUI · 只读' });
+  assert.deepEqual(liveFromAgent({ status: 'observed' }), { kind: 'warn', label: 'TUI · 只读' });
+  assert.deepEqual(liveFromAgent({ status: 'starting' }), { kind: 'idle', label: 'connecting' });
   assert.equal(liveFromAgent(null), null);
+});
+
+test('connectionActionFor is none while TUI holds or connecting', () => {
+  assert.equal(connectionActionFor({ heldBy: 'tui' }), 'none');
+  assert.equal(connectionActionFor({ status: 'starting' }), 'none');
+  assert.equal(connectionActionFor({ status: 'disconnected' }), 'connect');
+  assert.equal(connectionActionFor({ status: 'idle', connected: true }), 'disconnect');
+});
+
+test('connectionConfirmFor requires a sheet for connect and disconnect', () => {
+  assert.equal(connectionConfirmFor('none'), null);
+  const disconnect = connectionConfirmFor('disconnect');
+  assert.ok(disconnect);
+  assert.equal(disconnect.danger, true);
+  assert.equal(disconnect.confirmLabel, 'Disconnect');
+  const connect = connectionConfirmFor('connect');
+  assert.ok(connect);
+  assert.equal(connect.danger, false);
+  assert.equal(connect.confirmLabel, 'Connect');
 });
 
 test('contextFromAgent is home when no agent is selected', () => {

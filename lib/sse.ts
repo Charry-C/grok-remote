@@ -27,7 +27,9 @@ export function writeHeaders(res: ServerResponse): void {
   // Push headers to the client right away so EventSource transitions out of
   // CONNECTING as soon as the route handler accepts the request.
   try { if (typeof res.flushHeaders === 'function') res.flushHeaders(); } catch { /* ignore */ }
-  res.write('retry: 5000\n\n');
+  // 2s is enough to survive a Tailscale blip without a 5s dead gap, and
+  // the chat UI waits slightly longer than this before showing a warning.
+  res.write('retry: 2000\n\n');
 }
 
 export function writeEvent(res: ServerResponse, { id, event, data }: SseEvent): boolean {
@@ -39,7 +41,16 @@ export function writeEvent(res: ServerResponse, { id, event, data }: SseEvent): 
   // Support multi-line data per the SSE spec.
   for (const line of payload.split('\n')) chunk += `data: ${line}\n`;
   chunk += '\n';
-  return res.write(chunk);
+  // res.write() returns false on kernel-buffer backpressure, NOT on a dead
+  // socket. The chunk is still queued. Callers must treat false as "accepted"
+  // and only hang up when the response is already ended/destroyed (or write
+  // throws). Closing on backpressure drops the EventSource mid-turn.
+  try {
+    res.write(chunk);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function writePing(res: ServerResponse): void {

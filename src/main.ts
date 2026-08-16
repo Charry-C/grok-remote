@@ -4,23 +4,20 @@ import Split from 'split.js';
 import { api } from './lib/api.js';
 import { AgentsSidebar } from './views/agents.js';
 import { ChatView } from './views/chat.js';
-import { SettingsView } from './views/settings.js';
 import { el } from './lib/render.js';
 import { registerPwa } from './lib/pwa.js';
-import { applyTheme, getTheme, nextTheme, getThemeMeta } from './lib/themes.js';
-import { installVersionFooter } from './lib/version-footer.js';
-import { SYSTEM_PAGES, getSystemPage } from './views/system/index.js';
+import { applyTheme, getTheme } from './lib/themes.js';
 import { iconHtml } from './lib/icons.js';
 import { loadLastAgent } from './lib/last-agent.js';
-import { copyToClipboard } from './lib/copy.js';
 import {
   PRODUCT_NAME,
   type TopbarContext,
+  connectionActionFor,
+  connectionConfirmFor,
   contextFromAgent,
   documentTitleFor,
-  formatCwd,
-  pageTitle,
 } from './lib/topbar.js';
+import { openPromptSheet } from './views/prompt-sheet.js';
 
 interface Agent {
   id: string;
@@ -29,31 +26,23 @@ interface Agent {
   inFlight?: number;
   lastSessionId?: string | null;
   sessionId?: string | null;
+  heldBy?: string | null;
   [k: string]: unknown;
 }
 
 type Route =
   | { name: 'home' }
   | { name: 'chat'; agentId: string }
-  | { name: 'settings'; sub: string }
-  | { name: 'system'; area: string; parts: string[] }
   | { name: 'redirect'; to: string };
-
-interface SystemPageRef {
-  area: string;
-  module?: { mount?: (host: HTMLElement, route?: unknown) => void; unmount?: () => void };
-}
 
 applyTheme(getTheme());
 
 function syncThemeToggle(name: string): void {
-  const meta = getThemeMeta(name);
-  const dot   = document.getElementById('theme-toggle-dot');
-  const label = document.getElementById('theme-toggle-label');
-  const btn   = document.getElementById('theme-toggle');
-  if (dot)   dot.style.background = meta.accent;
-  if (label) label.textContent = meta.label;
-  if (btn)   btn.title = `theme: ${meta.label} (click to cycle)`;
+  document.querySelectorAll<HTMLElement>('[data-appearance]').forEach((node) => {
+    const on = node.getAttribute('data-appearance') === name;
+    node.classList.toggle('is-on', on);
+    node.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
 }
 
 window.addEventListener('storage', (ev: StorageEvent) => {
@@ -75,7 +64,7 @@ function setStatus(kind: string, text: string): void {
   status.title = text;
   pill.className = `status-dot status-dot--${kind}`;
   pill.textContent = '';
-  txt.textContent = kind === 'ok' ? 'tailnet' : text;
+  txt.textContent = kind === 'ok' ? 'ok' : text;
 }
 
 let lastTopbarCtx: TopbarContext = { kind: 'home', title: PRODUCT_NAME };
@@ -92,26 +81,19 @@ function applyTopbar(ctx: TopbarContext): void {
   const titleEl = document.getElementById('topbar-title') as HTMLButtonElement | null;
   const titleRow = document.getElementById('topbar-title-row');
   const metaEl = document.getElementById('topbar-meta') as HTMLElement | null;
-  const liveEl = document.getElementById('topbar-live') as HTMLElement | null;
+  const liveEl = document.getElementById('topbar-live') as HTMLButtonElement | null;
   const liveLabel = document.getElementById('topbar-live-label');
   const modelEl = document.getElementById('topbar-model') as HTMLElement | null;
   const cwdBtn = document.getElementById('topbar-cwd') as HTMLButtonElement | null;
-  const cwdPath = document.getElementById('topbar-cwd-path');
 
   if (root) root.setAttribute('data-kind', ctx.kind);
 
   if (titleEl) {
     titleEl.textContent = ctx.title;
-    const isChat = ctx.kind === 'chat';
-    titleEl.disabled = !isChat;
-    if (titleRow) titleRow.classList.toggle('is-action', isChat);
-    if (isChat) {
-      titleEl.title = 'Open agent settings';
-      titleEl.setAttribute('aria-label', `Agent settings for ${ctx.title}`);
-    } else {
-      titleEl.removeAttribute('title');
-      titleEl.setAttribute('aria-label', ctx.title);
-    }
+    titleEl.disabled = true;
+    if (titleRow) titleRow.classList.remove('is-action');
+    titleEl.removeAttribute('title');
+    titleEl.setAttribute('aria-label', ctx.title);
   }
 
   const showLive = !!(ctx.kind === 'chat' && ctx.live);
@@ -120,60 +102,54 @@ function applyTopbar(ctx: TopbarContext): void {
     if (ctx.live) {
       liveEl.className = `topbar-live topbar-live--${ctx.live.kind}`;
       liveLabel.textContent = ctx.live.label;
+      const action = ctx.connectionAction || 'none';
+      liveEl.disabled = action === 'none';
+      const title = action === 'connect'
+        ? 'Reconnect this conversation'
+        : action === 'disconnect'
+          ? 'Disconnect this conversation'
+          : (ctx.live.label === 'TUI · 只读'
+            ? 'TUI is using this session · read-only'
+            : ctx.live.label);
+      liveEl.title = title;
+      liveEl.setAttribute('aria-label', title);
     }
   }
 
-  const model = ctx.kind === 'chat' ? (ctx.model || '') : '';
   if (modelEl) {
-    modelEl.hidden = !model;
-    modelEl.textContent = model;
-    modelEl.title = model;
+    modelEl.hidden = true;
+    modelEl.textContent = '';
+  }
+  if (cwdBtn) {
+    cwdBtn.hidden = true;
+    cwdBtn.dataset.cwd = '';
   }
 
-  const cwd = ctx.kind === 'chat' ? (ctx.cwd || '') : '';
-  if (cwdBtn && cwdPath) {
-    cwdBtn.hidden = !cwd;
-    cwdBtn.dataset.cwd = cwd;
-    cwdPath.textContent = formatCwd(cwd);
-    cwdBtn.title = cwd ? `Copy path: ${cwd}` : '';
-    cwdBtn.setAttribute('aria-label', cwd ? `Copy working directory ${cwd}` : 'working directory');
-  }
-
-  if (metaEl) metaEl.hidden = !(showLive || !!model || !!cwd);
+  if (metaEl) metaEl.hidden = true;
   paintDocumentTitle();
 }
 
 async function pingHello(): Promise<void> {
   try {
-    const data = await api.hello() as { tailscale?: { backend?: string } };
-    const ts = data && data.tailscale;
-    if (ts && ts.backend === 'Running') setStatus('ok', 'tailnet up');
-    else if (ts) setStatus('warn', `tailscale: ${ts.backend || 'unknown'}`);
-    else setStatus('warn', 'no tailscale identity');
+    await api.hello();
+    setStatus('ok', 'api up');
   } catch {
     setStatus('fail', 'api unreachable');
   }
 }
-
-const SYSTEM_AREAS = new Set(SYSTEM_PAGES.map((p) => p.area));
-
-const SETTINGS_AREAS = new Set([
-  'general',
-  'skills', 'subagents', 'hooks', 'plugins', 'marketplaces',
-  'mcp', 'lsp', 'models', 'worktrees', 'import', 'setup',
-]);
 
 function parseRoute(): Route {
   const h = (location.hash || '#/').replace(/^#/, '');
   const parts = h.split('/').filter(Boolean);
   if (!parts.length) return { name: 'home' };
   if (parts[0] === 'agents' && parts[1]) return { name: 'chat', agentId: parts[1] };
-  if (parts[0] === 'settings') {
-    return { name: 'settings', sub: parts[1] || 'general' };
-  }
-  if (parts[0] && SYSTEM_AREAS.has(parts[0])) return { name: 'system', area: parts[0], parts };
-  if (parts[0] && SETTINGS_AREAS.has(parts[0])) {
-    return { name: 'redirect', to: `#/settings/${parts[0]}` };
+  if (parts[0] === 'settings' || parts[0] === 'memory' || parts[0] === 'leaders'
+      || parts[0] === 'sessions' || parts[0] === 'health' || parts[0] === 'skills'
+      || parts[0] === 'subagents' || parts[0] === 'hooks' || parts[0] === 'plugins'
+      || parts[0] === 'marketplaces' || parts[0] === 'mcp' || parts[0] === 'lsp'
+      || parts[0] === 'models' || parts[0] === 'worktrees' || parts[0] === 'import'
+      || parts[0] === 'setup' || parts[0] === 'flow' || parts[0] === 'trace') {
+    return { name: 'redirect', to: '#/' };
   }
   return { name: 'home' };
 }
@@ -186,7 +162,20 @@ function navigate(hash: string): void {
   }
 }
 
+function lockDrawerViewport(): void {
+  // Snapshot the chat column — not the window — so the topbar is not
+  // counted twice. Search-focus keyboard resize then cannot lift the
+  // composer into the gap beside the drawer.
+  const app = document.getElementById('app');
+  const h = app ? Math.round(app.getBoundingClientRect().height) : window.innerHeight;
+  document.documentElement.style.setProperty('--drawer-lock-h', `${h}px`);
+}
+function unlockDrawerViewport(): void {
+  document.documentElement.style.removeProperty('--drawer-lock-h');
+}
+
 function openDrawer(): void {
+  lockDrawerViewport();
   document.body.setAttribute('data-drawer-open', '');
   const btn = document.getElementById('hamburger-btn');
   if (btn) btn.setAttribute('aria-expanded', 'true');
@@ -195,6 +184,7 @@ function openDrawer(): void {
 }
 function closeDrawer(): void {
   document.body.removeAttribute('data-drawer-open');
+  unlockDrawerViewport();
   const btn = document.getElementById('hamburger-btn');
   if (btn) btn.setAttribute('aria-expanded', 'false');
   const bd = document.getElementById('drawer-backdrop') as HTMLElement | null;
@@ -205,62 +195,10 @@ function toggleDrawer(): void {
   else openDrawer();
 }
 
-interface RailIconOpts {
-  href: string;
-  title: string;
-  area: string;
-  iconName?: string;
-  label?: string;
-}
-
-function makeRailIcon({ href, title, area, iconName, label }: RailIconOpts): HTMLElement {
-  const a = el('a', {
-    class: 'left-rail-item',
-    href,
-    title,
-    'aria-label': title,
-    'data-area': area,
-  });
-  const icon = document.createElement('span');
-  icon.className = 'left-rail-icon';
-  icon.innerHTML = iconHtml(iconName || '');
-  a.appendChild(icon);
-  const lbl = el('span', { class: 'left-rail-label' }, label || title);
-  a.appendChild(lbl);
-  return a;
-}
-
-function buildLeftRail(): HTMLElement {
-  const rail = el('nav', { class: 'left-rail', 'aria-label': 'top-level navigation' });
-  rail.appendChild(makeRailIcon({
-    href: '#/', title: 'conversations', area: 'home', iconName: 'home', label: 'chats',
-  }));
-  for (const p of SYSTEM_PAGES) {
-    rail.appendChild(makeRailIcon({
-      href: `#/${p.area}`, title: p.label, area: p.area, iconName: p.iconName, label: p.label,
-    }));
-  }
-  return rail;
-}
-
-function updateRailHighlight(route: Route): void {
-  const rail = document.querySelector('.left-rail');
-  if (!rail) return;
-  let activeArea = 'home';
-  if (route.name === 'chat') activeArea = 'home';
-  else if (route.name === 'system') activeArea = route.area;
-  for (const item of rail.querySelectorAll<HTMLElement>('.left-rail-item')) {
-    item.classList.toggle('left-rail-item--active', item.dataset.area === activeArea);
-  }
-}
-
 function mountDashboard(): void {
   const host = document.getElementById('app');
   if (!host) return;
   host.replaceChildren();
-  // replaceChildren wipes the static #drawer-backdrop from index.html.
-  // Recreate it here so tap-outside can close the mobile drawer. Stays
-  // inside .app so it shares the stacking context with the sidebar.
   const backdrop = el('div', {
     class: 'drawer-backdrop',
     id: 'drawer-backdrop',
@@ -269,10 +207,8 @@ function mountDashboard(): void {
   host.appendChild(backdrop);
 
   let currentAgent: Agent | null = null;
-  let activeSystemPage: SystemPageRef | null = null;
-  const chat     = new ChatView();
-  const settings = new SettingsView();
-  const sidebar  = new AgentsSidebar({
+  const chat = new ChatView();
+  const sidebar = new AgentsSidebar({
     onSelect: (id: string) => {
       chat.focusConversation();
       navigate(`#/agents/${encodeURIComponent(id)}`);
@@ -287,10 +223,8 @@ function mountDashboard(): void {
   });
 
   const mainHost = el('div', { class: 'main-pane' });
-  const railHost = buildLeftRail();
-  const shell = el('div', { class: 'dashboard dashboard--with-rail' });
+  const shell = el('div', { class: 'dashboard' });
   host.appendChild(shell);
-  shell.appendChild(railHost);
 
   const splitHost   = el('div', { class: 'split-host' });
   const sidebarPane = el('div', { class: 'sidebar-pane' });
@@ -302,17 +236,7 @@ function mountDashboard(): void {
   shell.appendChild(splitHost);
 
   installOuterSplit(splitHost, sidebarPane, mainPane);
-  installToolsToggle();
 
-  const settingsBtn = document.getElementById('open-settings');
-  if (settingsBtn) {
-    settingsBtn.innerHTML = iconHtml('gear');
-    settingsBtn.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      navigate('#/settings');
-      closeDrawer();
-    });
-  }
   const brandLink = document.getElementById('brand-link');
   if (brandLink) {
     brandLink.addEventListener('click', (ev) => {
@@ -322,27 +246,32 @@ function mountDashboard(): void {
     });
   }
 
-  const titleEl = document.getElementById('topbar-title') as HTMLButtonElement | null;
-  const titleRow = document.getElementById('topbar-title-row');
-  const openAgentSettings = () => {
-    if (titleEl && titleEl.disabled) return;
-    document.dispatchEvent(new CustomEvent('grok-remote:open-agent-settings'));
-  };
-  if (titleEl) titleEl.addEventListener('click', openAgentSettings);
-  if (titleRow) titleRow.addEventListener('click', openAgentSettings);
-  const cwdBtn = document.getElementById('topbar-cwd') as HTMLButtonElement | null;
-  const cwdPath = document.getElementById('topbar-cwd-path');
-  if (cwdBtn && cwdPath) {
-    cwdBtn.addEventListener('click', async () => {
-      const cwd = cwdBtn.dataset.cwd || '';
-      if (!cwd) return;
-      const ok = await copyToClipboard(cwd);
-      if (!ok) return;
-      const orig = cwdPath.textContent;
-      cwdPath.textContent = 'copied';
-      window.setTimeout(() => {
-        if (cwdPath.textContent === 'copied') cwdPath.textContent = orig || formatCwd(cwd);
-      }, 1100);
+  const liveEl = document.getElementById('topbar-live') as HTMLButtonElement | null;
+  let connectionConfirmOpen = false;
+  if (liveEl) {
+    liveEl.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      if (liveEl.disabled || connectionConfirmOpen) return;
+      const copy = connectionConfirmFor(lastTopbarCtx.connectionAction || 'none');
+      if (!copy) {
+        document.dispatchEvent(new CustomEvent('grok-remote:toggle-connection'));
+        return;
+      }
+      connectionConfirmOpen = true;
+      try {
+        const ok = await openPromptSheet({
+          title: copy.title,
+          hint: copy.hint,
+          icon: 'none',
+          ask: false,
+          danger: copy.danger,
+          confirmLabel: copy.confirmLabel,
+        });
+        if (ok == null) return;
+        document.dispatchEvent(new CustomEvent('grok-remote:toggle-connection'));
+      } finally {
+        connectionConfirmOpen = false;
+      }
     });
   }
 
@@ -359,8 +288,6 @@ function mountDashboard(): void {
     paintDocumentTitle();
   });
 
-  installBgTracker();
-
   shell.addEventListener('click', (ev) => {
     if (!document.body.hasAttribute('data-drawer-open')) return;
     const target = ev.target as Element | null;
@@ -369,50 +296,13 @@ function mountDashboard(): void {
     }
   });
 
-  let activeSettings = false;
-
-  function unmountActiveSystemPage(): void {
-    if (!activeSystemPage) return;
-    try { activeSystemPage.module?.unmount?.(); } catch { /* ignore */ }
-    activeSystemPage = null;
-  }
-  function unmountActiveSettings(): void {
-    if (!activeSettings) return;
-    try { settings.unmount(); } catch { /* ignore */ }
-    activeSettings = false;
-  }
-
   function renderRoute(): void {
     const route = parseRoute();
     if (route.name === 'redirect') {
       location.replace(location.pathname + location.search + route.to);
       return;
     }
-    if (route.name === 'settings' && activeSettings) {
-      updateRailHighlight(route);
-      settings.setActive(route.sub);
-      return;
-    }
-    unmountActiveSystemPage();
-    unmountActiveSettings();
     mainHost.replaceChildren();
-    updateRailHighlight(route);
-    if (route.name === 'system') {
-      const page = getSystemPage(route.area) as SystemPageRef | null;
-      applyTopbar({ kind: 'system', title: pageTitle(route.area) });
-      if (page && page.module && typeof page.module.mount === 'function') {
-        page.module.mount(mainHost, route);
-        activeSystemPage = page;
-        return;
-      }
-    }
-    if (route.name === 'settings') {
-      applyTopbar({ kind: 'settings', title: 'Settings' });
-      settings.mount(mainHost);
-      settings.setActive(route.sub);
-      activeSettings = true;
-      return;
-    }
     if (route.name === 'chat') {
       chat.mount(mainHost);
       let want = route.agentId;
@@ -423,7 +313,10 @@ function mountDashboard(): void {
         currentAgent = found;
         sidebar.selectedId = found.id;
         sidebar.renderList();
-        applyTopbar(contextFromAgent(found));
+        applyTopbar({
+          ...contextFromAgent(found),
+          connectionAction: connectionActionFor(found),
+        });
         chat.setAgent(found);
       } else {
         applyTopbar(contextFromAgent({ id: route.agentId }));
@@ -431,7 +324,10 @@ function mountDashboard(): void {
           currentAgent = (a as Agent | null) || { id: route.agentId };
           sidebar.selectedId = currentAgent.id;
           sidebar.renderList();
-          applyTopbar(contextFromAgent(currentAgent));
+          applyTopbar({
+            ...contextFromAgent(currentAgent),
+            connectionAction: connectionActionFor(currentAgent),
+          });
           chat.setAgent(currentAgent);
         }).catch(() => {
           currentAgent = { id: route.agentId };
@@ -465,15 +361,6 @@ document.addEventListener('DOMContentLoaded', () => {
   mountDashboard();
 
   syncThemeToggle(getTheme());
-  const themeBtn = document.getElementById('theme-toggle');
-  if (themeBtn) {
-    themeBtn.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      const n = nextTheme(getTheme());
-      syncThemeToggle(n);
-      window.dispatchEvent(new CustomEvent('grok-remote:theme-change', { detail: { theme: n } }));
-    });
-  }
 
   const ham = document.getElementById('hamburger-btn');
   if (ham) {
@@ -494,22 +381,25 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.addEventListener('grok-remote:close-drawer', () => closeDrawer());
   document.addEventListener('grok-remote:open-drawer', () => openDrawer());
-  // Fallback: any tap outside the drawer (and not on the hamburger)
-  // closes it. Covers the case where the backdrop is missing or a
-  // later sibling ate the click.
   document.addEventListener('click', (ev) => {
     if (!document.body.hasAttribute('data-drawer-open')) return;
-    const target = ev.target as Element | null;
-    if (!target || !target.closest) return;
-    if (target.closest('.sidebar')) return;
-    if (target.closest('#hamburger-btn')) return;
-    if (target.closest('#drawer-backdrop')) return;
+    // composedPath is captured at dispatch. Sidebar clicks that re-render
+    // the list (folder collapse) detach ev.target, so closest('.sidebar')
+    // would falsely look like an outside tap and slam the drawer shut.
+    const path = ev.composedPath();
+    const inside = path.some((n) => {
+      if (!(n instanceof Element)) return false;
+      if (n.classList.contains('sidebar')) return true;
+      if (n.id === 'hamburger-btn' || n.id === 'drawer-backdrop') return true;
+      if (n.classList.contains('tui-sheet') || n.classList.contains('prompt-sheet') || n.classList.contains('ctx-sheet') || n.classList.contains('filter-sheet')) return true;
+      if (n.classList.contains('sidebar-sort-menu')) return true;
+      return false;
+    });
+    if (inside) return;
     closeDrawer();
   });
 
   registerPwa();
-
-  installVersionFooter();
 });
 
 const SIDEBAR_SIZES_KEY = 'grok-remote.split.sidebar';
@@ -536,32 +426,6 @@ function readSidebarSizes(): [number, number] {
 
 function isSidebarCollapsed(): boolean {
   try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'; } catch { return false; }
-}
-
-function installToolsToggle(): void {
-  const btn = document.getElementById('topbar-sidebar-right') as HTMLElement | null;
-  if (!btn) return;
-  if (isMobileViewport()) {
-    btn.hidden = true;
-    return;
-  }
-  btn.hidden = false;
-  let collapsed = false;
-  function paint(): void {
-    btn!.innerHTML = iconHtml(collapsed ? 'panel-right-open' : 'panel-right-close');
-    btn!.title = collapsed ? 'show tool calls panel' : 'hide tool calls panel';
-    btn!.setAttribute('aria-label', btn!.title);
-  }
-  paint();
-  btn.addEventListener('click', (ev) => {
-    ev.preventDefault();
-    document.dispatchEvent(new CustomEvent('grok-remote:tools-toggle'));
-  });
-  document.addEventListener('grok-remote:tools-state', (ev: Event) => {
-    const ce = ev as CustomEvent<{ collapsed?: boolean }>;
-    collapsed = !!(ce && ce.detail && ce.detail.collapsed);
-    paint();
-  });
 }
 
 function installOuterSplit(splitHost: HTMLElement, sidebarPane: HTMLElement, mainPane: HTMLElement): void {
@@ -667,147 +531,4 @@ function installOuterSplit(splitHost: HTMLElement, sidebarPane: HTMLElement, mai
       location.reload();
     }
   });
-}
-
-interface BgTerminal {
-  id: string;
-  command?: string;
-  cwd?: string;
-  url?: string;
-  exited?: boolean;
-  exitStatus?: { exitCode?: number | null; signal?: string | null };
-}
-interface BgGroup { agentId: string; agentName?: string; terminals?: BgTerminal[] }
-interface BgSnapshot { runningCount?: number; agents?: BgGroup[] }
-
-function installBgTracker(): void {
-  const btn   = document.getElementById('topbar-bg') as HTMLElement | null;
-  const count = btn ? btn.querySelector<HTMLElement>('.topbar-bg__count') : null;
-  if (!btn || !count) return;
-
-  let lastSnapshot: BgSnapshot | null = null;
-
-  async function tick(): Promise<void> {
-    if (document.hidden) return;
-    try {
-      const data = await api.terminals.global() as BgSnapshot;
-      lastSnapshot = data;
-      const n = (data && data.runningCount) || 0;
-      const totalEntries = (data && Array.isArray(data.agents))
-        ? data.agents.reduce((a, g) => a + (g.terminals?.length || 0), 0)
-        : 0;
-      btn!.hidden = totalEntries === 0;
-      count!.textContent = `bg: ${n}`;
-      btn!.classList.toggle('topbar-bg--active', n > 0);
-      btn!.classList.toggle('topbar-bg--exited-only', n === 0 && totalEntries > 0);
-    } catch {
-      btn!.hidden = true;
-    }
-  }
-  btn.addEventListener('click', () => openBgViewer(() => lastSnapshot));
-  void tick();
-  setInterval(() => { void tick(); }, 3000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) void tick(); });
-}
-
-function openBgViewer(getSnapshot: () => BgSnapshot | null): void {
-  const overlay = el('div', { class: 'bgglobal-viewer' });
-  const closeBtn = el('button', {
-    type: 'button', class: 'bgglobal-viewer__close',
-    onclick: () => overlay.remove(),
-  }, '×');
-  const title = el('div', { class: 'bgglobal-viewer__title' }, 'background processes');
-  const body  = el('div', { class: 'bgglobal-viewer__body' });
-  overlay.appendChild(el('div', { class: 'bgglobal-viewer__head' }, title, closeBtn));
-  overlay.appendChild(body);
-  document.body.appendChild(overlay);
-
-  async function render(): Promise<void> {
-    if (!overlay.isConnected) return;
-    let data: BgSnapshot | null = getSnapshot && getSnapshot();
-    try { data = await api.terminals.global() as BgSnapshot; } catch { /* keep stale */ }
-    body.replaceChildren();
-    const groups = (data && Array.isArray(data.agents)) ? data.agents : [];
-    if (!groups.length) {
-      body.appendChild(el('div', { class: 'bgglobal-viewer__empty' },
-        'no background processes are running.'));
-      return;
-    }
-    for (const g of groups) {
-      const groupEl = el('div', { class: 'bgglobal-viewer__group' });
-      groupEl.appendChild(el('div', { class: 'bgglobal-viewer__group-head' },
-        el('span', { class: 'bgglobal-viewer__agent-name' }, g.agentName || g.agentId),
-        el('button', {
-          type: 'button',
-          class: 'bgglobal-viewer__open-conv',
-          onclick: () => {
-            overlay.remove();
-            navigate(`#/agents/${encodeURIComponent(g.agentId)}`);
-          },
-        }, 'open conversation'),
-      ));
-      for (const t of (g.terminals || [])) {
-        const exited = !!t.exited;
-        const code = t.exitStatus && (t.exitStatus.exitCode ?? t.exitStatus.signal);
-        const row = el('div', { class: `bgglobal-viewer__term ${exited ? 'bgglobal-viewer__term--exited' : ''}` },
-          el('span', { class: 'bgglobal-viewer__term-status' },
-            el('span', { class: 'bgglobal-viewer__term-dot' }),
-            exited ? `exit ${code ?? '?'}` : 'running'),
-          el('div', { class: 'bgglobal-viewer__term-cmd' }, t.command || ''),
-          el('div', { class: 'bgglobal-viewer__term-cwd' }, t.cwd || ''),
-          el('div', { class: 'bgglobal-viewer__term-actions' },
-            (t.url && !exited) && el('a', {
-              class: 'bgglobal-viewer__open-url',
-              href: t.url,
-              target: '_blank',
-              rel: 'noopener',
-              title: `open ${t.url}`,
-              html: `<span class="bgglobal-viewer__open-url-ico">${iconHtml('globe')}</span><span class="bgglobal-viewer__open-url-label">Open App</span>`,
-            }),
-            el('button', {
-              type: 'button', class: 'bgglobal-viewer__open-output',
-              onclick: () => {
-                overlay.remove();
-                navigate(`#/agents/${encodeURIComponent(g.agentId)}`);
-              },
-            }, 'view in conversation'),
-            !exited && el('button', {
-              type: 'button', class: 'bgglobal-viewer__kill',
-              onclick: (ev: MouseEvent) => {
-                const btn = ev.currentTarget as HTMLButtonElement;
-                btn.disabled = true;
-                btn.textContent = 'killing...';
-                row.classList.add('bgglobal-viewer__term--killing');
-                void (async () => {
-                  try {
-                    await api.terminals.kill(g.agentId, t.id);
-                    btn.textContent = 'kill sent';
-                    const stEl = row.querySelector('.bgglobal-viewer__term-status');
-                    if (stEl) {
-                      stEl.replaceChildren(
-                        el('span', { class: 'bgglobal-viewer__term-dot' }),
-                        document.createTextNode('killing'),
-                      );
-                    }
-                  } catch (err) {
-                    btn.disabled = false;
-                    btn.textContent = 'kill failed; retry';
-                    btn.title = err instanceof Error ? err.message : String(err);
-                  }
-                })();
-              },
-            }, 'kill'),
-          ),
-        );
-        groupEl.appendChild(row);
-      }
-      body.appendChild(groupEl);
-    }
-  }
-
-  void render();
-  const timer = setInterval(() => {
-    if (!overlay.isConnected) { clearInterval(timer); return; }
-    void render();
-  }, 1500);
 }

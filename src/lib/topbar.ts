@@ -2,14 +2,13 @@
 //
 // The topbar title is "where am I?", not the product name:
 //   home      -> Grok Remote
-//   chat      -> conversation name + live status + model + cwd
-//   settings  -> Settings
-//   system    -> page label
+//   chat      -> conversation name + live connection status
 //
 // Kept DOM-free so the mapping can be unit-tested.
 
-export type TopbarKind = 'home' | 'chat' | 'settings' | 'system';
+export type TopbarKind = 'home' | 'chat';
 export type LiveKind = 'ok' | 'warn' | 'fail' | 'idle' | 'run';
+export type ConnectionAction = 'connect' | 'disconnect' | 'none';
 
 export interface TopbarLive {
   kind: LiveKind;
@@ -22,6 +21,7 @@ export interface TopbarContext {
   model?: string | null;
   cwd?: string | null;
   live?: TopbarLive | null;
+  connectionAction?: ConnectionAction;
 }
 
 export interface TopbarAgent {
@@ -32,10 +32,12 @@ export interface TopbarAgent {
   status?: string | null;
   connected?: boolean | null;
   inFlight?: number | null;
+  heldBy?: string | null;
+  wantedConnected?: boolean | null;
   settings?: { model?: string | null } | null;
 }
 
-export const PRODUCT_NAME = 'Grok Remote';
+export const PRODUCT_NAME = 'Grok';
 export const PRODUCT_DOCUMENT_TITLE = 'grok-remote';
 
 export function conversationTitle(agent: TopbarAgent | null | undefined): string {
@@ -78,14 +80,17 @@ export function liveFromAgent(agent: TopbarAgent | null | undefined): TopbarLive
   const status = String(agent.status || '');
   const inFlight = typeof agent.inFlight === 'number' ? agent.inFlight : 0;
 
+  if (agent.heldBy === 'tui' || status === 'observed') {
+    return { kind: 'warn', label: 'TUI · 只读' };
+  }
   if (status === 'errored' || status === 'killed') {
-    return { kind: 'fail', label: status };
+    return { kind: 'fail', label: 'error' };
   }
   if (status === 'disconnected' || status === 'exited') {
     return { kind: 'warn', label: 'offline' };
   }
   if (status === 'starting') {
-    return { kind: 'idle', label: 'starting' };
+    return { kind: 'idle', label: 'connecting' };
   }
   if (status === 'running' || inFlight > 0) {
     return { kind: 'run', label: inFlight > 0 ? 'working' : 'running' };
@@ -93,7 +98,45 @@ export function liveFromAgent(agent: TopbarAgent | null | undefined): TopbarLive
   if (agent.connected || status === 'idle') {
     return { kind: 'ok', label: 'connected' };
   }
-  return { kind: 'idle', label: status || 'idle' };
+  return { kind: 'idle', label: status || 'offline' };
+}
+
+export function connectionActionFor(agent: TopbarAgent | null | undefined): ConnectionAction {
+  if (!agent) return 'none';
+  if (agent.heldBy === 'tui' || agent.status === 'observed') return 'none';
+  if (agent.status === 'starting') return 'none';
+  const disconnected = agent.status === 'disconnected' || agent.status === 'exited'
+    || agent.status === 'errored' || agent.status === 'killed'
+    || (!agent.connected && agent.wantedConnected === false);
+  return disconnected ? 'connect' : 'disconnect';
+}
+
+export interface ConnectionConfirmCopy {
+  title: string;
+  hint: string;
+  confirmLabel: string;
+  danger: boolean;
+}
+
+/** Confirm-sheet copy for a connect / disconnect tap. `none` has no sheet. */
+export function connectionConfirmFor(action: ConnectionAction): ConnectionConfirmCopy | null {
+  if (action === 'disconnect') {
+    return {
+      title: 'Disconnect this conversation?',
+      hint: 'The agent process stops. Sending a message will reconnect.',
+      confirmLabel: 'Disconnect',
+      danger: true,
+    };
+  }
+  if (action === 'connect') {
+    return {
+      title: 'Reconnect this conversation?',
+      hint: 'Start the agent process for this session.',
+      confirmLabel: 'Connect',
+      danger: false,
+    };
+  }
+  return null;
 }
 
 export function contextFromAgent(agent: TopbarAgent | null | undefined): TopbarContext {
@@ -107,6 +150,7 @@ export function contextFromAgent(agent: TopbarAgent | null | undefined): TopbarC
     model: model || null,
     cwd: agent.cwd || null,
     live: liveFromAgent(agent),
+    connectionAction: connectionActionFor(agent),
   };
 }
 

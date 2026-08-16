@@ -2,6 +2,8 @@
 // No external libraries. All functions return DOM nodes or strings.
 
 import type { TokenMeta } from './token-usage';
+import { hasTurnLedger } from './token-usage';
+import { fmtUsd, fmtUsdFromTicks } from './format';
 export type { TokenMeta };
 
 type ElChild = Node | string | number | boolean | null | undefined | ElChild[];
@@ -389,26 +391,146 @@ export interface ThinkingPane {
   isActive(): boolean;
 }
 
+export function isTerminalToolStatus(s: unknown): boolean {
+  const k = String(s || '').trim().toLowerCase();
+  return k === 'completed' || k === 'failed' || k === 'canceled' || k === 'cancelled'
+    || k === 'success' || k === 'succeeded' || k === 'error' || k === 'errored'
+    || k === 'done';
+}
+
+export type ToolRowPhase = 'live' | 'done' | 'todo';
+
+export function toolRowPhase(status: unknown, isTodo?: boolean): ToolRowPhase {
+  if (isTodo) return 'todo';
+  return isTerminalToolStatus(status) ? 'done' : 'live';
+}
+
+export const WORK_ROW_SETTLE_MS = 2000;
+
+export function workRowHideAt(opts: {
+  phase: ToolRowPhase;
+  settle: boolean;
+  prevHideAt: number | null;
+  now: number;
+  holdMs?: number;
+}): number | null {
+  if (opts.phase !== 'done') return null;
+  if (opts.prevHideAt != null) return opts.prevHideAt;
+  return opts.settle ? opts.now + (opts.holdMs ?? WORK_ROW_SETTLE_MS) : 0;
+}
+
+export function workRowIsHolding(hideAt: number | null, now: number): boolean {
+  return hideAt != null && hideAt > now;
+}
+
+export function collapseKindRuns(kinds: string[]): { kind: string; n: number }[] {
+  const out: { kind: string; n: number }[] = [];
+  for (const raw of kinds) {
+    const kind = String(raw || 'tool').trim() || 'tool';
+    const last = out[out.length - 1];
+    if (last && last.kind === kind) last.n += 1;
+    else out.push({ kind, n: 1 });
+  }
+  return out;
+}
+
+export interface WorkLogHead {
+  title: string;
+  count: string;
+  chips: { kind: string; n: number }[];
+}
+
+export function formatWorkLogHead(input: {
+  done: number;
+  live: number;
+  kinds: string[];
+  open: boolean;
+}): WorkLogHead {
+  const done = Number(input && input.done) || 0;
+  const live = Number(input && input.live) || 0;
+  const chips = collapseKindRuns((input && input.kinds) || []);
+  if (input && input.open) {
+    const total = done + live;
+    return {
+      title: total === 1 ? '1 tool' : `${total} tools`,
+      count: '',
+      chips: [],
+    };
+  }
+  if (live && done) {
+    return {
+      title: '',
+      count: done === 1 ? '1 done' : `${done} done`,
+      chips,
+    };
+  }
+  if (live && !done) {
+    return {
+      title: live === 1 ? 'working' : `${live} working`,
+      count: '',
+      chips: [],
+    };
+  }
+  return {
+    title: '',
+    count: done === 1 ? '1 tool' : `${done} tools`,
+    chips,
+  };
+}
+
+function displayToolTitle(update: ToolPayload): string {
+  const ri = update && update.rawInput;
+  if (ri) {
+    const loc = ri.target_file || ri.path || ri.file_path || ri.url || ri.command || ri.cmd
+      || (ri as { query?: unknown }).query;
+    if (loc) return String(loc);
+  }
+  const raw = inferToolTitle(update || {});
+  const tick = raw.match(/`([^`]+)`/);
+  if (tick && tick[1]) return tick[1];
+  return raw;
+}
+
 export function renderThinkingPane(): ThinkingPane {
-  const dots = el('span', { class: 'thinking-dots' }, '...');
-  const summary = el('summary', { class: 'thinking-summary' },
-    el('span', { class: 'thinking-label' }, 'thinking'),
-    dots,
-  );
-  const body = el('pre', { class: 'thinking-body' });
-  const details = el('details', { class: 'thinking' }, summary, body);
+  const caret = el('span', { class: 'work-thought__caret', 'aria-hidden': 'true' }, '›');
+  const mark = el('span', { class: 'work-thought__mark work-thought__mark--live', 'aria-hidden': 'true' });
+  const label = el('span', { class: 'work-thought__label' }, 'thought');
+  const hint = el('span', { class: 'work-thought__hint' }, '');
+  const toggle = el('button', {
+    type: 'button',
+    class: 'work-thought__toggle',
+    'aria-expanded': 'false',
+    onclick: () => setOpen(!open),
+  }, caret, mark, label, hint);
+  const body = el('pre', { class: 'work-thought__body thinking-body' });
+  const node = el('div', {
+    class: 'work-thought thinking work-thought--live',
+    role: 'group',
+    'aria-label': 'Thought',
+  }, toggle, body);
+
   let buf = '';
   let active = true;
+  let open = false;
+
+  function setOpen(next: boolean): void {
+    open = next;
+    node.classList.toggle('work-thought--open', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
   return {
-    node: details,
+    node,
     append(text: string): void {
       buf += text;
       body.textContent = buf;
     },
     finalize(): void {
       active = false;
-      dots.textContent = '';
-      summary.classList.add('thinking-summary--done');
+      node.classList.remove('work-thought--live');
+      node.classList.add('work-thought--done');
+      mark.className = 'work-thought__mark work-thought__mark--done';
+      hint.textContent = '';
     },
     text(): string { return buf; },
     isActive(): boolean { return active; },
@@ -436,7 +558,8 @@ function normalizeStatus(s: unknown): string | null {
     case 'inprogress':               return 'Running';
     case 'completed':
     case 'success':
-    case 'succeeded':                return 'Completed';
+    case 'succeeded':
+    case 'done':                     return 'Completed';
     case 'failed':
     case 'error':
     case 'errored':                  return 'Failed';
@@ -491,86 +614,132 @@ export interface ToolCard {
   applyUpdate(payload: ToolPayload): void;
   appendDelta(payload: unknown): void;
   getStatus(): string;
+  getKind(): string;
+  /** Stop the live duration clock. Used when the turn ends without a terminal update. */
+  finalize(status?: string): void;
   ingestExternal?: (payload: ToolPayload) => void;
   isTodo?: boolean;
 }
 
-export function renderToolCard(initial: ToolPayload): ToolCard {
+/** True when a work-row should keep ticking its duration. */
+export function toolDurationShouldTick(status: unknown, live: boolean): boolean {
+  return !!live && !isTerminalToolStatus(status);
+}
+
+function paintRowMark(markEl: HTMLElement, canonical: string): void {
+  const k = String(canonical || '').toLowerCase();
+  markEl.className = 'work-row__mark';
+  markEl.textContent = '';
+  if (k === 'failed' || k === 'error' || k === 'errored') {
+    markEl.classList.add('work-row__mark--fail');
+    markEl.textContent = '×';
+  } else if (k === 'completed' || k === 'canceled' || k === 'cancelled' || k === 'done') {
+    markEl.classList.add('work-row__mark--done');
+  } else {
+    markEl.classList.add('work-row__mark--live');
+  }
+}
+
+export function renderToolCard(initial: ToolPayload, opts?: { live?: boolean }): ToolCard {
   if (isTodoWriteToolCall(initial)) return renderTodoWriteCard(initial);
-  const status = readStatus(initial) || 'Pending';
-  const styleInfo = STATUS_STYLES[status] || PENDING_STYLE;
+  let status = readStatus(initial) || 'Pending';
+  let kind = String((initial && initial.kind) || 'tool');
+  const live = !opts || opts.live !== false;
   const startedAt = Date.now();
   let endedAt: number | null = null;
 
-  const kindEl   = el('span', { class: 'tool-pill__kind' }, (initial && initial.kind) || 'tool');
-  const titleEl  = el('span', { class: 'tool-pill__label' }, inferToolTitle(initial || {}));
-  const durEl    = el('span', { class: 'tool-pill__dur' }, '');
-  const statusEl = el('span', { class: `tool-pill__status ${styleInfo.cls}` }, styleInfo.label);
-  const caretEl  = el('span', { class: 'tool-pill__caret' }, '▸');
+  const markEl  = el('span', { class: 'work-row__mark', 'aria-hidden': 'true' });
+  const kindEl  = el('span', { class: 'work-row__kind tool-pill__kind' }, kind);
+  const titleEl = el('span', { class: 'work-row__title tool-title tool-pill__label' }, displayToolTitle(initial || {}));
+  const durEl   = el('span', { class: 'work-row__dur tool-pill__dur' }, '');
+  paintRowMark(markEl, status);
 
-  const rawInputBody = el('pre', { class: 'tool-pill-body__pre' });
+  const rawInputBody = el('pre', { class: 'work-row__pre tool-raw-body tool-pill-body__pre' });
   rawInputBody.textContent = initial && initial.rawInput ? JSON.stringify(initial.rawInput, null, 2) : '{}';
-  const outputBody = el('pre', { class: 'tool-pill-body__pre' });
+  const outputBody = el('pre', { class: 'work-row__pre tool-output-body tool-pill-body__pre' });
 
-  const inputSection = el('div', { class: 'tool-pill-body__section' },
-    el('div', { class: 'tool-pill-body__title' }, 'input'),
+  const inputSection = el('div', { class: 'work-row__section tool-pill-body__section' },
+    el('div', { class: 'work-row__kicker tool-pill-body__title' }, 'input'),
     rawInputBody,
   );
-  const outputSection = el('div', { class: 'tool-pill-body__section tool-pill-body__section--output' },
-    el('div', { class: 'tool-pill-body__title' }, 'output'),
+  const outputSection = el('div', { class: 'work-row__section work-row__section--output tool-pill-body__section' },
+    el('div', { class: 'work-row__kicker tool-pill-body__title' }, 'output'),
     outputBody,
   );
-  const body = el('div', { class: 'tool-pill__body', hidden: true }, inputSection, outputSection);
+  const body = el('div', { class: 'work-row__body tool-pill__body', hidden: true }, inputSection, outputSection);
 
   const head = el('button', {
     type: 'button',
-    class: 'tool-pill__head',
-    title: inferToolTitle(initial || {}),
+    class: 'work-row__head tool-pill__head',
+    title: displayToolTitle(initial || {}),
     onclick: () => {
       body.hidden = !body.hidden;
-      caretEl.textContent = body.hidden ? '▸' : '▾';
+      node.classList.toggle('work-row--open', !body.hidden);
       node.classList.toggle('tool-pill--open', !body.hidden);
     },
-  }, caretEl, kindEl, titleEl, durEl, statusEl);
+  }, markEl, kindEl, titleEl, durEl);
 
-  const node = el('div', { class: 'tool-pill', dataset: { toolId: (initial && initial.toolCallId) || '' } },
-    head,
-    body,
-  );
+  const node = el('div', {
+    class: 'work-row tool-pill',
+    dataset: { toolId: (initial && initial.toolCallId) || '' },
+  }, head, body);
 
   let outputBuf = '';
 
   let durTimer: ReturnType<typeof setInterval> | null = null;
-  const isTerminal = (status === 'Completed' || status === 'Failed' || status === 'Canceled');
-  if (isTerminal) {
+  if (isTerminalToolStatus(status)) {
     endedAt = startedAt;
     durEl.textContent = '';
-  } else {
+  } else if (toolDurationShouldTick(status, live)) {
     durTimer = setInterval(() => {
       if (endedAt) { if (durTimer) clearInterval(durTimer); durTimer = null; return; }
-      durEl.textContent = fmtDur(Date.now() - startedAt) + '…';
+      durEl.textContent = fmtDur(Date.now() - startedAt);
     }, 500);
   }
 
-  function setStatus(canonical: string): void {
-    const info = STATUS_STYLES[canonical] || styleInfo;
-    statusEl.className = `tool-pill__status ${info.cls}`;
-    statusEl.textContent = info.label;
-    if ((canonical === 'Completed' || canonical === 'Failed' || canonical === 'Canceled') && !endedAt) {
-      endedAt = Date.now();
-      if (durTimer) { clearInterval(durTimer); durTimer = null; }
-      durEl.textContent = fmtDur(endedAt - startedAt);
+  function stopClock(paintDuration: boolean): void {
+    if (durTimer) { clearInterval(durTimer); durTimer = null; }
+    if (endedAt) return;
+    endedAt = Date.now();
+    if (paintDuration && live) {
+      // Freeze the last painted value if the interval already wrote one;
+      // otherwise compute from startedAt (wire completion of a live card).
+      if (!durEl.textContent) durEl.textContent = fmtDur(endedAt - startedAt);
+    } else if (!live) {
+      durEl.textContent = '';
     }
+  }
+
+  function setStatus(canonical: string): void {
+    status = canonical;
+    paintRowMark(markEl, canonical);
+    if (isTerminalToolStatus(canonical)) stopClock(true);
+  }
+
+  function finalize(nextStatus?: string): void {
+    if (isTerminalToolStatus(status)) {
+      stopClock(false);
+      return;
+    }
+    const canonical = readStatus({ status: nextStatus } as ToolPayload) || 'Completed';
+    status = canonical;
+    paintRowMark(markEl, canonical);
+    stopClock(true);
   }
 
   function applyUpdate(payload: ToolPayload): void {
     const canonical = readStatus(payload);
     if (canonical) setStatus(canonical);
-    if (payload.title || (payload.rawInput && payload.rawInput.command)) {
-      titleEl.textContent = inferToolTitle(payload);
-      head.title = inferToolTitle(payload);
+    if (payload.title || (payload.rawInput && (payload.rawInput.command || payload.rawInput.cmd
+      || payload.rawInput.target_file || payload.rawInput.path || payload.rawInput.file_path))) {
+      const nextTitle = displayToolTitle(payload);
+      titleEl.textContent = nextTitle;
+      head.title = nextTitle;
     }
-    if (payload.kind) kindEl.textContent = payload.kind;
+    if (payload.kind) {
+      kind = String(payload.kind);
+      kindEl.textContent = kind;
+    }
     if (payload.rawInput) {
       rawInputBody.textContent = JSON.stringify(payload.rawInput, null, 2);
     }
@@ -616,7 +785,14 @@ export function renderToolCard(initial: ToolPayload): ToolCard {
     outputBody.textContent = outputBuf;
   }
 
-  return { node, applyUpdate, appendDelta, getStatus: () => statusEl.textContent || '' };
+  return {
+    node,
+    applyUpdate,
+    appendDelta,
+    getStatus: () => (STATUS_STYLES[status] || PENDING_STYLE).label,
+    getKind: () => kind,
+    finalize,
+  };
 }
 
 interface TodoEntry { content: string; status: string }
@@ -624,6 +800,7 @@ interface TodoEntry { content: string; status: string }
 export function renderTodoWriteCard(initial: ToolPayload): ToolCard {
   const startedAt = Date.now();
   let endedAt: number | null = null;
+  let todoStatus = 'running';
   void startedAt; void endedAt;
   const todos = new Map<string, TodoEntry>();
 
@@ -639,7 +816,7 @@ export function renderTodoWriteCard(initial: ToolPayload): ToolCard {
     statusEl,
   );
   const list = el('ol', { class: 'todo-card__list' });
-  const node = el('div', { class: 'tool-pill tool-pill--todo todo-card' }, head, list);
+  const node = el('div', { class: 'work-row work-row--todo tool-pill tool-pill--todo todo-card' }, head, list);
 
   function statusGlyph(s: string | undefined): string {
     if (s === 'completed')   return '✓';
@@ -692,10 +869,12 @@ export function renderTodoWriteCard(initial: ToolPayload): ToolCard {
       statusEl.textContent = 'done';
       statusEl.classList.remove('todo-card__status--running');
       statusEl.classList.add('todo-card__status--done');
+      todoStatus = 'completed';
     } else {
       statusEl.textContent = 'running';
       statusEl.classList.add('todo-card__status--running');
       statusEl.classList.remove('todo-card__status--done');
+      todoStatus = 'running';
     }
   }
 
@@ -713,33 +892,179 @@ export function renderTodoWriteCard(initial: ToolPayload): ToolCard {
     node,
     applyUpdate,
     appendDelta: (): void => { /* TodoWrite uses rawInput, not delta chunks */ },
-    getStatus: (): string => statusEl.textContent || '',
+    getStatus: (): string => todoStatus,
+    getKind: (): string => 'plan',
     ingestExternal: (payload: ToolPayload): void => { ingest(payload); applyStatus(payload); render(); },
+    finalize: (nextStatus?: string): void => {
+      applyStatus({ status: nextStatus || 'completed' });
+    },
     isTodo: true,
   };
 }
 
-export function renderTokenFooter(meta: TokenMeta | null | undefined): HTMLElement {
-  if (!meta) return el('div', { class: 'turn-footer' }, 'turn complete');
-  const inputT  = meta.inputTokens     ?? meta.input_tokens     ?? '·';
-  const outputT = meta.outputTokens    ?? meta.output_tokens    ?? '·';
-  const cachedT = meta.cachedReadTokens ?? meta.cached_read_tokens ?? meta.cachedTokens ?? '·';
-  const reasonT = meta.reasoningTokens ?? meta.reasoning_tokens ?? '·';
-  const total   = meta.totalTokens     ?? meta.total_tokens     ?? null;
-  const model   = meta.modelId         ?? meta.model_id         ?? meta.model ?? null;
-  const stop    = meta.stopReason      ?? meta.stop_reason      ?? null;
+export interface ToolLog {
+  node: HTMLElement;
+  add(card: ToolCard, opts?: { settle?: boolean }): void;
+  replace(prev: ToolCard, next: ToolCard): void;
+  refresh(): void;
+  isOpen(): boolean;
+}
 
-  const chips = [
-    chip('in',     inputT),
-    chip('out',    outputT),
-    chip('cached', cachedT),
-    chip('think',  reasonT),
-  ];
-  if (total != null) chips.push(chip('total', total));
-  if (model) chips.push(chip('model', model));
-  if (stop)  chips.push(chip('stop', stop));
-  chips.push(chip('cost', 'n/a'));
+const WORK_LOG_CHIP_CAP = 6;
 
+interface ToolLogEntry {
+  card: ToolCard;
+  settle: boolean;
+  hideAt: number | null;
+}
+
+export function renderToolLog(): ToolLog {
+  const caret = el('span', { class: 'work-log__caret', 'aria-hidden': 'true' }, '›');
+  const titleEl = el('span', { class: 'work-log__title' }, '');
+  const chipsEl = el('span', { class: 'work-log__chips' });
+  const countEl = el('span', { class: 'work-log__count' }, '');
+  const toggle = el('button', {
+    type: 'button',
+    class: 'work-log__toggle',
+    'aria-expanded': 'false',
+    onclick: () => setOpen(!open),
+  }, caret, titleEl, chipsEl, countEl);
+  const list = el('div', { class: 'work-log__list' });
+  const node = el('div', {
+    class: 'work-log',
+    role: 'group',
+    'aria-label': 'Tools',
+  }, toggle, list);
+
+  let open = false;
+  const entries: ToolLogEntry[] = [];
+  let hideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function setOpen(next: boolean): void {
+    open = next;
+    node.classList.toggle('work-log--open', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    refresh();
+  }
+
+  function mount(card: ToolCard): void {
+    card.node.classList.add('work-row');
+    if (card.isTodo) card.node.classList.add('work-row--todo');
+    list.appendChild(card.node);
+  }
+
+  function add(card: ToolCard, opts?: { settle?: boolean }): void {
+    entries.push({
+      card,
+      settle: !!(opts && opts.settle),
+      hideAt: null,
+    });
+    mount(card);
+    refresh();
+  }
+
+  function replace(prev: ToolCard, next: ToolCard): void {
+    const i = entries.findIndex((e) => e.card === prev);
+    const prevEntry = i >= 0 ? entries[i] : undefined;
+    const settle = !!(prevEntry && prevEntry.settle);
+    const nextEntry: ToolLogEntry = { card: next, settle, hideAt: null };
+    if (i >= 0) entries[i] = nextEntry;
+    else entries.push(nextEntry);
+    if (prev.node && prev.node.parentNode) prev.node.parentNode.replaceChild(next.node, prev.node);
+    else mount(next);
+    next.node.classList.add('work-row');
+    if (next.isTodo) next.node.classList.add('work-row--todo');
+    refresh();
+  }
+
+  function scheduleHide(): void {
+    if (hideTimer) {
+      clearTimeout(hideTimer);
+      hideTimer = null;
+    }
+    const now = Date.now();
+    let nextAt = Infinity;
+    for (const e of entries) {
+      if (e.hideAt != null && e.hideAt > now && e.hideAt < nextAt) nextAt = e.hideAt;
+    }
+    if (nextAt < Infinity) {
+      hideTimer = setTimeout(() => {
+        hideTimer = null;
+        refresh();
+      }, Math.max(0, nextAt - now));
+    }
+  }
+
+  function refresh(): void {
+    const kinds: string[] = [];
+    let done = 0;
+    let live = 0;
+    const now = Date.now();
+    for (const e of entries) {
+      const c = e.card;
+      const status = c.getStatus ? c.getStatus() : '';
+      const phase = toolRowPhase(status, c.isTodo);
+      e.hideAt = workRowHideAt({
+        phase,
+        settle: e.settle,
+        prevHideAt: e.hideAt,
+        now,
+      });
+      const holding = workRowIsHolding(e.hideAt, now);
+      c.node.classList.toggle('work-row--done', phase === 'done');
+      c.node.classList.toggle('work-row--live', phase === 'live');
+      c.node.classList.toggle('work-row--todo', phase === 'todo' || !!c.isTodo);
+      c.node.classList.toggle('work-row--hold', holding);
+      if (phase === 'done') {
+        done += 1;
+        kinds.push((c.getKind && c.getKind()) || 'tool');
+      } else if (phase === 'live') {
+        live += 1;
+      }
+    }
+    const head = formatWorkLogHead({ done, live, kinds, open });
+    titleEl.textContent = head.title;
+    titleEl.hidden = !head.title;
+    countEl.textContent = head.count;
+    countEl.hidden = !head.count;
+    chipsEl.replaceChildren();
+    const shown = head.chips.slice(0, WORK_LOG_CHIP_CAP);
+    const hidden = head.chips.slice(WORK_LOG_CHIP_CAP).reduce((sum, ch) => sum + ch.n, 0);
+    for (const ch of shown) {
+      const label = ch.n > 1 ? `${ch.kind} ×${ch.n}` : ch.kind;
+      chipsEl.appendChild(el('span', { class: 'work-log__chip' }, label));
+    }
+    if (hidden) chipsEl.appendChild(el('span', { class: 'work-log__chip work-log__chip--more' }, `+${hidden}`));
+    chipsEl.hidden = chipsEl.childNodes.length === 0;
+    node.classList.toggle('work-log--has-live', live > 0);
+    node.hidden = entries.length === 0;
+    scheduleHide();
+  }
+
+  return { node, add, replace, refresh, isOpen: () => open };
+}
+
+export function renderTokenFooter(meta: TokenMeta | null | undefined): HTMLElement | null {
+  if (!hasTurnLedger(meta) || !meta) return null;
+
+  const chips: HTMLElement[] = [];
+  const pushNum = (label: string, n: number | undefined) => {
+    if (typeof n === 'number' && Number.isFinite(n)) chips.push(chip(label, n));
+  };
+  pushNum('in', meta.inputTokens ?? meta.input_tokens);
+  pushNum('out', meta.outputTokens ?? meta.output_tokens);
+  pushNum('cached', meta.cachedReadTokens ?? meta.cached_read_tokens ?? meta.cachedTokens);
+  pushNum('think', meta.reasoningTokens ?? meta.reasoning_tokens);
+  pushNum('total', (meta.totalTokens ?? meta.total_tokens) ?? undefined);
+
+  const ticks = meta.costUsdTicks ?? meta.cost_usd_ticks ?? meta.total_cost_usd_ticks;
+  const usd = meta.costUSD ?? meta.costUsd ?? meta.cost_usd ?? meta.total_cost_usd;
+  const cost = typeof ticks === 'number' && Number.isFinite(ticks)
+    ? fmtUsdFromTicks(ticks)
+    : (typeof usd === 'number' && Number.isFinite(usd) ? fmtUsd(usd) : '');
+  if (cost) chips.push(chip('cost', cost));
+
+  if (!chips.length) return null;
   return el('div', { class: 'turn-footer' }, ...chips);
 }
 

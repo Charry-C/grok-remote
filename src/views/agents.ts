@@ -1,4 +1,4 @@
-// Agents sidebar: list + new + star + archive + folders.
+// Conversation sidebar: list + new + star + archive + folders.
 //
 // Rows are intentionally compact: status dot + star + name + archive close. The
 // model badge, connect/disconnect link, and cwd path were moved off the row.
@@ -8,7 +8,12 @@
 import { api } from '../lib/api.js';
 import { el, renderToast } from '../lib/render.js';
 import { fmtTokens } from '../lib/format.js';
+import { iconHtml } from '../lib/icons.js';
+import { setTheme } from '../lib/themes.js';
 import { computeSelection } from './agents-selection.js';
+import { openCwdSheet } from './cwd-sheet.js';
+import { openImportSheet } from './import-sheet.js';
+import { openPromptSheet } from './prompt-sheet.js';
 
 const STATUS_LABEL: Record<string, string> = {
   idle:         'idle',
@@ -22,6 +27,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 const SORT_KEY        = 'grok-remote.sidebar.sort';
+const STATUS_KEY      = 'grok-remote.sidebar.status-filter';
 const SEARCH_KEY      = 'grok-remote.sidebar.search';
 const COLLAPSED_KEY   = 'grok-remote.sidebar.collapsed-folders';
 const SORT_DEFAULT    = 'created_desc';
@@ -41,14 +47,48 @@ const DELETE_TUI_CONFIRM =
 interface SortConfig { label: string; cmp(a: Agent, b: Agent): number }
 
 const SORTS: Record<string, SortConfig> = {
-  created_desc:    { label: 'newest first',     cmp: (a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') },
-  created_asc:     { label: 'oldest first',     cmp: (a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') },
-  activity_desc:   { label: 'last active',      cmp: (a, b) => (b.lastSeen   || '').localeCompare(a.lastSeen   || '') },
-  name_asc:        { label: 'name (a -> z)',    cmp: (a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' }) },
+  created_desc:    { label: 'Newest first',  cmp: (a, b) => (b.createdAt || '').localeCompare(a.createdAt || '') },
+  created_asc:     { label: 'Oldest first',  cmp: (a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') },
+  activity_desc:   { label: 'Last active',   cmp: (a, b) => (b.lastSeen   || '').localeCompare(a.lastSeen   || '') },
+  name_asc:        { label: 'Name A–Z',      cmp: (a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' }) },
 };
+
+interface StatusFilter {
+  id: string;
+  label: string;
+  match: string[];
+}
+
+const STATUS_FILTERS: StatusFilter[] = [
+  { id: 'idle',          label: 'Idle',          match: ['idle'] },
+  { id: 'running',       label: 'Running',       match: ['running', 'starting'] },
+  { id: 'watching',      label: 'Watching TUI',  match: ['observed'] },
+  { id: 'disconnected',  label: 'Disconnected',  match: ['disconnected', 'exited'] },
+  { id: 'errored',       label: 'Errored',       match: ['errored', 'killed'] },
+];
+
+const STATUS_FILTER_IDS = new Set(STATUS_FILTERS.map((s) => s.id));
+
+function statusBucket(status?: string): string {
+  const raw = status || 'idle';
+  for (const f of STATUS_FILTERS) if (f.match.includes(raw)) return f.id;
+  return raw;
+}
 
 function loadSort(): string { try { const v = localStorage.getItem(SORT_KEY); return v && SORTS[v] ? v : SORT_DEFAULT; } catch { return SORT_DEFAULT; } }
 function saveSort(v: string): void { try { localStorage.setItem(SORT_KEY, v); } catch { /* ignore */ } }
+function loadStatusFilters(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STATUS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.filter((x): x is string => typeof x === 'string' && STATUS_FILTER_IDS.has(x)));
+  } catch { return new Set(); }
+}
+function saveStatusFilters(set: Set<string>): void {
+  try { localStorage.setItem(STATUS_KEY, JSON.stringify(Array.from(set))); } catch { /* ignore */ }
+}
 function loadSearch(): string { try { return localStorage.getItem(SEARCH_KEY) || ''; } catch { return ''; } }
 function saveSearch(v: string): void { try { localStorage.setItem(SEARCH_KEY, v); } catch { /* ignore */ } }
 function loadCollapsed(): Set<string> {
@@ -117,6 +157,7 @@ export class AgentsSidebar {
   selectionAnchor: string | null;
   pollHandle: ReturnType<typeof setInterval> | null;
   sortKey: string;
+  statusFilters: Set<string>;
   search: string;
   collapsed: Set<string>;
 
@@ -128,10 +169,13 @@ export class AgentsSidebar {
   error: HTMLElement;
   newBtn: HTMLButtonElement;
   newFolderBtn: HTMLButtonElement;
+  importBtn: HTMLButtonElement;
   closeDrawerBtn: HTMLButtonElement;
   searchInput: HTMLInputElement;
   searchClearBtn: HTMLButtonElement;
-  sortSelect: HTMLSelectElement;
+  sortBtn: HTMLButtonElement;
+  sortLabel: HTMLElement;
+  sortWrap: HTMLElement;
   root: HTMLElement;
 
   private _creating?: boolean;
@@ -158,6 +202,8 @@ export class AgentsSidebar {
 
   private _ctxMenu: HTMLElement | null = null;
   private _ctxCleanup: (() => void) | null = null;
+  private _sortMenu: HTMLElement | null = null;
+  private _sortCleanup: (() => void) | null = null;
 
   constructor({ onSelect, onCreate, onDelete }: AgentsSidebarOptions) {
     this.onSelect = onSelect;
@@ -170,6 +216,7 @@ export class AgentsSidebar {
     this.selectionAnchor = null;
     this.pollHandle = null;
     this.sortKey = loadSort();
+    this.statusFilters = loadStatusFilters();
     this.search  = loadSearch();
     this.collapsed = loadCollapsed();
 
@@ -182,22 +229,62 @@ export class AgentsSidebar {
     });
 
     this.empty = el('div', { class: 'agents-empty' }, 'no agents yet') as HTMLElement;
-    this.noMatch = el('div', { class: 'agents-empty' }, 'no conversations match your search') as HTMLElement;
+    this.noMatch = el('div', { class: 'agents-empty' }, 'No conversations match these filters') as HTMLElement;
     this.error = el('div', { class: 'agents-empty agents-empty--err' }) as HTMLElement;
     this.error.hidden = true;
 
     this.newBtn = el('button', {
       class: 'agents-new-btn',
-      title: 'spawn a new agent (auto-named from the first message)',
-      onclick: () => void this.spawnNew(),
-    }, '+ new') as HTMLButtonElement;
+      type: 'button',
+      title: 'New chat. Long-press to change the working directory.',
+    },
+      el('span', { class: 'agents-new-btn__ico', html: iconHtml('plus') }),
+      el('span', { class: 'agents-new-btn__label' }, 'New chat'),
+    ) as HTMLButtonElement;
+    let suppressNewClick = false;
+    this.newBtn.addEventListener('click', () => {
+      if (suppressNewClick) { suppressNewClick = false; return; }
+      void this.spawnNew();
+    });
+    this.newBtn.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      suppressNewClick = true;
+      void this.changeDefaultCwd();
+    });
+    let newPress: number | null = null;
+    this.newBtn.addEventListener('pointerdown', () => {
+      newPress = window.setTimeout(() => {
+        newPress = null;
+        suppressNewClick = true;
+        void this.changeDefaultCwd();
+      }, 520);
+    });
+    const cancelNewPress = () => {
+      if (newPress != null) { window.clearTimeout(newPress); newPress = null; }
+    };
+    this.newBtn.addEventListener('pointerup', cancelNewPress);
+    this.newBtn.addEventListener('pointercancel', cancelNewPress);
+    this.newBtn.addEventListener('pointerleave', cancelNewPress);
 
     this.newFolderBtn = el('button', {
-      class: 'agents-new-folder-btn',
+      class: 'agents-chip-btn agents-new-folder-btn',
       type: 'button',
-      title: 'create a new folder',
+      title: 'Create a folder',
       onclick: () => void this.promptNewFolder(),
-    }, '+ folder') as HTMLButtonElement;
+    },
+      el('span', { class: 'agents-chip-btn__ico', html: iconHtml('folder') }),
+      el('span', { class: 'agents-chip-btn__label' }, 'Folder'),
+    ) as HTMLButtonElement;
+
+    this.importBtn = el('button', {
+      class: 'agents-chip-btn agents-import-btn',
+      type: 'button',
+      title: 'Import a leftover TUI session',
+      onclick: () => this.openImport(),
+    },
+      el('span', { class: 'agents-chip-btn__ico', html: iconHtml('import') }),
+      el('span', { class: 'agents-chip-btn__label' }, 'Import'),
+    ) as HTMLButtonElement;
 
     this.closeDrawerBtn = el('button', {
       class: 'sidebar-close',
@@ -219,6 +306,11 @@ export class AgentsSidebar {
         saveSearch(this.search);
         this.renderList();
       },
+      onfocus: () => {
+        // iOS scrolls the document to keep inputs in view; the chat
+        // pane is frozen while the drawer is open, so snap back.
+        window.scrollTo(0, 0);
+      },
     }) as HTMLInputElement;
     this.searchClearBtn = el('button', {
       class: 'sidebar-search-clear',
@@ -234,20 +326,21 @@ export class AgentsSidebar {
       },
     }, '×') as HTMLButtonElement;
 
-    this.sortSelect = el('select', {
-      class: 'sidebar-sort',
-      'aria-label': 'sort conversations',
-      onchange: (ev: Event) => {
-        const target = ev.target as HTMLSelectElement;
-        this.sortKey = target.value;
-        saveSort(this.sortKey);
-        this.renderList();
-      },
+    this.sortLabel = el('span', { class: 'sidebar-filter__label' }, 'Filter') as HTMLElement;
+    this.sortBtn = el('button', {
+      class: 'sidebar-filter__btn',
+      type: 'button',
+      'aria-label': 'Filter conversations',
+      'aria-haspopup': 'dialog',
+      'aria-expanded': 'false',
+      onclick: () => this.toggleFilterSheet(),
     },
-      ...Object.entries(SORTS).map(([k, s]) =>
-        el('option', { value: k, ...(k === this.sortKey ? { selected: '' } : {}) }, s.label),
-      ),
-    ) as HTMLSelectElement;
+      el('span', { class: 'sidebar-filter__ico', html: iconHtml('sliders') }),
+      this.sortLabel,
+      el('span', { class: 'sidebar-filter__caret', html: iconHtml('chevron-down') }),
+    ) as HTMLButtonElement;
+    this.sortWrap = el('div', { class: 'sidebar-filter' }, this.sortBtn) as HTMLElement;
+    this.paintFilterButton();
 
     this.multiSelectLabel = el('span', { class: 'sidebar-multi__label' }, '') as HTMLElement;
     const clearBtn = el('button', {
@@ -261,19 +354,53 @@ export class AgentsSidebar {
       clearBtn,
     ) as HTMLElement;
 
+    const themeDark = el('button', {
+      class: 'sidebar-theme__opt',
+      type: 'button',
+      'data-appearance': 'dark',
+      title: 'Dark appearance',
+      'aria-label': 'Use dark appearance',
+      onclick: () => setTheme('dark'),
+    },
+      el('span', { class: 'sidebar-theme__ico', html: iconHtml('moon') }),
+      el('span', { class: 'sidebar-theme__txt' }, 'Dark'),
+    ) as HTMLButtonElement;
+    const themeLight = el('button', {
+      class: 'sidebar-theme__opt',
+      type: 'button',
+      'data-appearance': 'light',
+      title: 'Light appearance',
+      'aria-label': 'Use light appearance',
+      onclick: () => setTheme('light'),
+    },
+      el('span', { class: 'sidebar-theme__ico', html: iconHtml('sun') }),
+      el('span', { class: 'sidebar-theme__txt' }, 'Light'),
+    ) as HTMLButtonElement;
+
     this.root = el('aside', { class: 'sidebar' },
       el('div', { class: 'sidebar-head' },
-        el('span', { class: 'sidebar-title' }, 'agents'),
-        this.newBtn,
-        this.newFolderBtn,
-        this.closeDrawerBtn,
+        el('div', { class: 'sidebar-head__row' },
+          el('span', { class: 'sidebar-title' }, 'Chats'),
+          this.closeDrawerBtn,
+        ),
+        el('div', { class: 'sidebar-theme', role: 'group', 'aria-label': 'Appearance' },
+          themeDark,
+          themeLight,
+        ),
+        el('div', { class: 'sidebar-actions' },
+          this.newBtn,
+          el('div', { class: 'sidebar-actions__secondary' },
+            this.newFolderBtn,
+            this.importBtn,
+          ),
+        ),
       ),
       el('div', { class: 'sidebar-tools' },
         el('div', { class: 'sidebar-search' },
           this.searchInput,
           this.searchClearBtn,
         ),
-        this.sortSelect,
+        this.sortWrap,
       ),
       this.error,
       el('div', { class: 'sidebar-body' },
@@ -311,10 +438,10 @@ export class AgentsSidebar {
     this.multiSelectLabel.textContent = `${n} selected`;
   }
 
-  // Visible, sorted, search-filtered agent IDs in their on-screen order.
+  // Visible, sorted, search-and-status-filtered agent IDs in on-screen order.
   // Used as the ordering universe for shift-click range selection.
   private _visibleOrderedIds(): string[] {
-    const visible = this._sortAgents(this.agents).filter((a) => this._matchesSearch(a));
+    const visible = this._sortAgents(this.agents).filter((a) => this._isVisible(a));
     const folderById = new Map<string, Folder>();
     for (const f of this.folders) folderById.set(f.id, f);
     const folderOfAgent = new Map<string, string>();
@@ -356,6 +483,19 @@ export class AgentsSidebar {
         || (a.model || '').toLowerCase().includes(needle)
         || (a.lastSessionId || '').toLowerCase().includes(needle)
         || (a.sessionId || '').toLowerCase().includes(needle);
+  }
+
+  private _matchesStatus(a: Agent): boolean {
+    if (this.statusFilters.size === 0) return true;
+    return this.statusFilters.has(statusBucket(a.status));
+  }
+
+  private _isVisible(a: Agent): boolean {
+    return this._matchesSearch(a) && this._matchesStatus(a);
+  }
+
+  private _isFiltering(): boolean {
+    return !!this.search || this.statusFilters.size > 0;
   }
 
   // Leftover `grok-remote:resume-tui` events still land here after the
@@ -401,8 +541,9 @@ export class AgentsSidebar {
     this._creating = true;
     this.newBtn.disabled = true;
     this.error.hidden = true;
-    const prevLabel = this.newBtn.textContent;
-    this.newBtn.textContent = 'spawning...';
+    const labelEl = this.newBtn.querySelector('.agents-new-btn__label');
+    const prevLabel = labelEl?.textContent || 'New chat';
+    if (labelEl) labelEl.textContent = 'Starting…';
     try {
       let defaultCwd = '';
       try {
@@ -410,13 +551,14 @@ export class AgentsSidebar {
         defaultCwd = typeof settings.defaultCwd === 'string' ? settings.defaultCwd.trim() : '';
       } catch { defaultCwd = ''; }
       if (!defaultCwd) {
-        this._toast('Set a default cwd in Settings first.');
-        return;
+        defaultCwd = (await openCwdSheet({ current: '' })) || '';
+        if (!defaultCwd) return;
       }
       const created = await api.createAgent({}) as Agent;
       if (typeof this.onCreate === 'function') this.onCreate(created);
       await this.refresh();
       if (created && created.id) this.select(created.id);
+      document.dispatchEvent(new CustomEvent('grok-remote:close-drawer'));
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'failed to spawn agent';
       this.error.textContent = msg;
@@ -424,20 +566,209 @@ export class AgentsSidebar {
     } finally {
       this._creating = false;
       this.newBtn.disabled = false;
-      this.newBtn.textContent = prevLabel;
+      if (labelEl) labelEl.textContent = prevLabel;
     }
   }
 
-  async promptNewFolder(): Promise<void> {
-    const name = window.prompt('New folder name:');
-    if (!name || !name.trim()) return;
+  private paintFilterButton(): void {
+    const n = this.statusFilters.size;
+    let text = 'Filter';
+    if (n === 1) {
+      const id = [...this.statusFilters][0]!;
+      const lab = STATUS_FILTERS.find((s) => s.id === id)?.label;
+      if (lab) text = `Filter · ${lab}`;
+    } else if (n > 1) {
+      text = `Filter · ${n} statuses`;
+    }
+    this.sortLabel.textContent = text;
+    this.sortWrap.classList.toggle('is-filtered', n > 0 || this.sortKey !== SORT_DEFAULT);
+    this.sortBtn.title = n
+      ? `${(SORTS[this.sortKey] || SORTS[SORT_DEFAULT]!).label} · ${text}`
+      : (SORTS[this.sortKey] || SORTS[SORT_DEFAULT]!).label;
+  }
+
+  private setSort(key: string): void {
+    if (!SORTS[key] || key === this.sortKey) return;
+    this.sortKey = key;
+    saveSort(this.sortKey);
+    this.paintFilterButton();
+    this._syncFilterSheet();
+    this.renderList();
+  }
+
+  private toggleStatusFilter(id: string): void {
+    if (!STATUS_FILTER_IDS.has(id)) return;
+    if (this.statusFilters.has(id)) this.statusFilters.delete(id);
+    else this.statusFilters.add(id);
+    saveStatusFilters(this.statusFilters);
+    this.paintFilterButton();
+    this._syncFilterSheet();
+    this.renderList();
+  }
+
+  private clearStatusFilters(): void {
+    if (this.statusFilters.size === 0) return;
+    this.statusFilters = new Set();
+    saveStatusFilters(this.statusFilters);
+    this.paintFilterButton();
+    this._syncFilterSheet();
+    this.renderList();
+  }
+
+  private toggleFilterSheet(): void {
+    if (this._sortMenu) this.closeFilterSheet();
+    else this.openFilterSheet();
+  }
+
+  private closeFilterSheet(): void {
+    if (this._sortCleanup) { this._sortCleanup(); this._sortCleanup = null; }
+    this._sortMenu?.remove();
+    this._sortMenu = null;
+    this.sortBtn.setAttribute('aria-expanded', 'false');
+    this.sortWrap.classList.remove('is-open');
+  }
+
+  private _syncFilterSheet(): void {
+    const sheet = this._sortMenu;
+    if (!sheet) return;
+    sheet.querySelectorAll<HTMLElement>('[data-sort]').forEach((btn) => {
+      btn.classList.toggle('is-on', btn.dataset.sort === this.sortKey);
+    });
+    sheet.querySelectorAll<HTMLElement>('[data-status]').forEach((btn) => {
+      const id = btn.dataset.status || '';
+      btn.classList.toggle('is-on', this.statusFilters.has(id));
+    });
+    const clear = sheet.querySelector<HTMLElement>('[data-clear-status]');
+    if (clear) clear.hidden = this.statusFilters.size === 0;
+  }
+
+  private openFilterSheet(): void {
+    this.closeFilterSheet();
+
+    const arrange = el('div', { class: 'filter-sheet__chips' },
+      ...Object.entries(SORTS).map(([k, s]) =>
+        el('button', {
+          class: `filter-sheet__chip${k === this.sortKey ? ' is-on' : ''}`,
+          type: 'button',
+          'data-sort': k,
+          onclick: () => this.setSort(k),
+        }, s.label),
+      ),
+    );
+
+    const statuses = el('div', { class: 'filter-sheet__chips' },
+      ...STATUS_FILTERS.map((s) =>
+        el('button', {
+          class: `filter-sheet__chip filter-sheet__chip--status${this.statusFilters.has(s.id) ? ' is-on' : ''}`,
+          type: 'button',
+          'data-status': s.id,
+          onclick: () => this.toggleStatusFilter(s.id),
+        },
+          el('span', { class: `filter-sheet__dot filter-sheet__dot--${s.id}` }),
+          s.label,
+        ),
+      ),
+    );
+
+    const clearBtn = el('button', {
+      class: 'filter-sheet__clear',
+      type: 'button',
+      'data-clear-status': '1',
+      hidden: this.statusFilters.size === 0 ? '' : undefined,
+      onclick: () => this.clearStatusFilters(),
+    }, 'Clear status') as HTMLButtonElement;
+
+    const sheet = el('div', {
+      class: 'tui-sheet filter-sheet',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': 'Filter conversations',
+      onclick: (ev: MouseEvent) => ev.stopPropagation(),
+    },
+      el('div', { class: 'tui-sheet__backdrop', onclick: () => this.closeFilterSheet() }),
+      el('div', { class: 'filter-sheet__card' },
+        el('div', { class: 'ctx-sheet__handle', 'aria-hidden': 'true' }),
+        el('header', { class: 'filter-sheet__head' },
+          el('h2', { class: 'filter-sheet__title' }, 'Filter'),
+          el('p', { class: 'filter-sheet__hint' }, 'Arrange the list, then keep only the states you want.'),
+        ),
+        el('section', { class: 'filter-sheet__section' },
+          el('h3', { class: 'filter-sheet__label' }, 'Arrange'),
+          arrange,
+        ),
+        el('section', { class: 'filter-sheet__section' },
+          el('h3', { class: 'filter-sheet__label' }, 'Status'),
+          statuses,
+          clearBtn,
+        ),
+      ),
+    ) as HTMLElement;
+
+    document.body.appendChild(sheet);
+    this._sortMenu = sheet;
+    this.sortBtn.setAttribute('aria-expanded', 'true');
+    this.sortWrap.classList.add('is-open');
+
+    const onDoc = (ev: Event): void => {
+      const tgt = ev.target as Node | null;
+      if (tgt && (sheet.contains(tgt) || this.sortBtn.contains(tgt))) return;
+      this.closeFilterSheet();
+    };
+    const onKey = (ev: KeyboardEvent): void => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.closeFilterSheet();
+        this.sortBtn.focus();
+      }
+    };
+    setTimeout(() => {
+      document.addEventListener('pointerdown', onDoc, true);
+      document.addEventListener('keydown', onKey, true);
+    }, 0);
+    this._sortCleanup = () => {
+      document.removeEventListener('pointerdown', onDoc, true);
+      document.removeEventListener('keydown', onKey, true);
+    };
+  }
+
+  async changeDefaultCwd(): Promise<void> {
+    let current = '';
     try {
-      await api.folders.create(name.trim());
+      const settings = await api.getSettings() as { defaultCwd?: unknown };
+      current = typeof settings.defaultCwd === 'string' ? settings.defaultCwd : '';
+    } catch { current = ''; }
+    const next = await openCwdSheet({ current });
+    if (next) this._toast(`cwd set to ${next}`);
+  }
+
+  openImport(): void {
+    openImportSheet({
+      onOpen: (id) => {
+        if (typeof this.onCreate === 'function') this.onCreate({ id } as Agent);
+        void this.refresh();
+        this.select(id);
+        document.dispatchEvent(new CustomEvent('grok-remote:close-drawer'));
+      },
+    });
+  }
+
+  async promptNewFolder(): Promise<void> {
+    const name = await openPromptSheet({
+      title: 'New folder',
+      hint: 'A place to group conversations. Drag chats in after you create it.',
+      icon: 'folder',
+      placeholder: 'Folder name',
+      confirmLabel: 'Create folder',
+    });
+    if (!name) return;
+    try {
+      await api.folders.create(name);
       await this.refreshFolders();
       this.renderList();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      alert(`create folder failed: ${msg}`);
+      this._toast(`Couldn't create folder: ${msg}`);
     }
   }
 
@@ -453,6 +784,7 @@ export class AgentsSidebar {
         const d = ev.detail || {};
         if (d.sessionId) void this.resumeTui(d);
       }) as EventListener);
+      document.addEventListener('grok-remote:close-drawer', () => this.closeFilterSheet());
       this._spawnHandlerWired = true;
     }
   }
@@ -593,7 +925,7 @@ export class AgentsSidebar {
       return;
     }
 
-    const visible = this._sortAgents(this.agents).filter((a) => this._matchesSearch(a));
+    const visible = this._sortAgents(this.agents).filter((a) => this._isVisible(a));
 
     // Bucket every visible agent by folder id. The system "Archived" folder
     // collects every archived agent automatically (the backend assigns them
@@ -630,17 +962,29 @@ export class AgentsSidebar {
       return;
     }
 
+    const filtering = this._isFiltering();
     if (this.folders.length > 0) {
-      this.activeList.appendChild(this.renderGroup(TOP_LEVEL_ID, 'top level', topLevel, null));
-      for (const f of this.folders) {
-        this.activeList.appendChild(this.renderGroup(f.id, f.name, buckets.get(f.id) || [], f));
+      if (!filtering || topLevel.length > 0) {
+        this.activeList.appendChild(this.renderGroup(TOP_LEVEL_ID, 'Top level', topLevel, null));
       }
+      for (const f of this.folders) {
+        const items = buckets.get(f.id) || [];
+        if (filtering && items.length === 0) continue;
+        this.activeList.appendChild(this.renderGroup(f.id, f.name, items, f));
+      }
+      if (!this.activeList.childElementCount) this.activeList.appendChild(this.noMatch);
     } else {
-      for (const a of topLevel) this.activeList.appendChild(this.renderItem(a, false));
+      if (!topLevel.length) this.activeList.appendChild(this.noMatch);
+      else for (const a of topLevel) this.activeList.appendChild(this.renderItem(a, false));
     }
+
+    // Later folders must paint over earlier ones in the same sticky slot.
+    this.activeList.querySelectorAll<HTMLElement>('.folder-header').forEach((h, i) => {
+      h.style.zIndex = String(2 + i);
+    });
   }
 
-  private renderGroup(groupId: string, label: string, items: Agent[], folder: Folder | null): HTMLElement {
+  private renderGroup(groupId: string, label: string, items: Agent[], folder: Folder | null): DocumentFragment {
     const isTopLevel = groupId === TOP_LEVEL_ID;
     const isSystem = !!(folder && folder.system);
     const isArchived = folder?.id === ARCHIVED_FOLDER_ID;
@@ -650,32 +994,51 @@ export class AgentsSidebar {
       : this.collapsed.has(groupId);
     const folderId = isTopLevel ? null : groupId;
 
-    const caret = el('span', { class: 'folder-caret' }, isCollapsed ? '▶' : '▼');
+    const caret = el('span', {
+      class: `folder-caret${isCollapsed ? ' is-collapsed' : ''}`,
+      html: iconHtml('chevron-down'),
+    });
+    const glyph = el('span', {
+      class: 'folder-glyph',
+      html: iconHtml(isArchived ? 'archive' : isTopLevel ? 'inbox' : 'folder'),
+    });
     const labelEl = el('span', { class: 'folder-name' }, label);
     const count = el('span', { class: 'folder-count' }, String(items.length));
 
     const deleteBtn = (!isTopLevel && !isSystem) ? el('button', {
       class: 'folder-delete',
       type: 'button',
-      title: 'delete folder (agents move back to top level)',
+      title: 'Delete folder (conversations move back to top level)',
+      'aria-label': `Delete folder ${label}`,
       onclick: async (ev: MouseEvent) => {
         ev.stopPropagation();
-        if (!confirm(`Delete folder "${label}"?\nIts agents move back to the top level.`)) return;
+        const ok = await openPromptSheet({
+          title: 'Delete folder?',
+          hint: `"${label}" will be removed. Conversations move back to the top level.`,
+          icon: 'folder',
+          ask: false,
+          danger: true,
+          confirmLabel: 'Delete folder',
+        });
+        if (ok == null) return;
         try {
           await api.folders.remove(folderId!);
           await this.refreshFolders();
           this.renderList();
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
-          alert(`delete folder failed: ${msg}`);
+          this._toast(`Couldn't delete folder: ${msg}`);
         }
       },
-    }, '×') as HTMLButtonElement : null;
+    },
+      el('span', { html: iconHtml('trash') }),
+    ) as HTMLButtonElement : null;
 
     const header = el('div', {
       class: `folder-header${isTopLevel ? ' folder-header--top' : ''}${isSystem ? ' folder-header--system' : ''}`,
       'data-folder-id': groupId,
-      onclick: () => {
+      onclick: (ev: MouseEvent) => {
+        ev.stopPropagation();
         if (isArchived) {
           // Inverse key so the default state is collapsed.
           const k = `open:${groupId}`;
@@ -692,19 +1055,25 @@ export class AgentsSidebar {
         ev.stopPropagation();
         this.beginInlineRenameFolder(folder, labelEl as HTMLElement);
       },
-    }, caret, labelEl, count, deleteBtn) as HTMLElement;
+    }, caret, glyph, labelEl, count, deleteBtn) as HTMLElement;
 
     const body = el('div', { class: 'folder-body' }) as HTMLElement;
     if (!isCollapsed) {
       if (items.length === 0) {
         body.appendChild(el('div', { class: 'folder-empty' },
-          isTopLevel ? 'drop agents here to remove from folders' : 'drop agents here'));
+          isTopLevel ? 'Drop a chat here to take it out of a folder' : 'Drop chats here'));
       } else {
         for (const a of items) body.appendChild(this.renderItem(a, false));
       }
     }
 
-    return el('div', { class: 'folder-group', 'data-folder-id': groupId }, header, body) as HTMLElement;
+    // Header + body are siblings in .agents-list (no wrapping box) so
+    // every header shares the list as its sticky containing block and
+    // later folders can cover earlier ones at the same top: 0 slot.
+    body.setAttribute('data-folder-id', groupId);
+    const frag = document.createDocumentFragment();
+    frag.append(header, body);
+    return frag;
   }
 
   private beginInlineRenameFolder(folder: Folder, labelEl: HTMLElement): void {
@@ -1184,7 +1553,7 @@ export class AgentsSidebar {
     this.renderList();
   }
 
-  private _showContextMenu(a: Agent, clientX: number, clientY: number): void {
+  private _showContextMenu(a: Agent, _clientX: number, _clientY: number): void {
     this._closeContextMenu();
 
     // Decide whether this menu acts on a single row or the multi-selection.
@@ -1207,20 +1576,31 @@ export class AgentsSidebar {
 
     const items: HTMLElement[] = [];
 
-    const mkItem = (label: string, run: () => void, opts?: { danger?: boolean }): HTMLElement => {
-      const btn = el('button', {
-        class: `ctx-menu__item${opts && opts.danger ? ' ctx-menu__danger' : ''}`,
+    const mkItem = (label: string, run: () => void, opts?: {
+      danger?: boolean;
+      icon?: string;
+      current?: boolean;
+    }): HTMLElement => {
+      return el('button', {
+        class: [
+          'ctx-sheet__item',
+          opts?.danger ? 'is-danger' : '',
+          opts?.current ? 'is-on' : '',
+        ].filter(Boolean).join(' '),
         type: 'button',
         onclick: (ev: MouseEvent) => {
           ev.stopPropagation();
           this._closeContextMenu();
           run();
         },
-      }, label) as HTMLElement;
-      return btn;
+      },
+        el('span', { class: 'ctx-sheet__ico', html: opts?.icon ? iconHtml(opts.icon) : '' }),
+        el('span', { class: 'ctx-sheet__lbl' }, label),
+        opts?.current ? el('span', { class: 'ctx-sheet__check', html: iconHtml('check') }) : null,
+      ) as HTMLElement;
     };
 
-    const mkSep = (): HTMLElement => el('div', { class: 'ctx-menu__sep' }) as HTMLElement;
+    const mkSep = (): HTMLElement => el('div', { class: 'ctx-sheet__sep' }) as HTMLElement;
 
     // Majority-vote on the current starred / archived state so the action
     // label reads naturally for the bulk case ("Star all" if most aren't
@@ -1242,7 +1622,7 @@ export class AgentsSidebar {
         const msg = e instanceof Error ? e.message : String(e);
         alert(`star failed: ${msg}`);
       }
-    }));
+    }, { icon: 'star' }));
 
     if (!bulk) {
       items.push(mkItem('Rename', () => {
@@ -1250,7 +1630,7 @@ export class AgentsSidebar {
           `.agent-item[data-agent-id="${CSS.escape(a.id)}"] .agent-name`,
         );
         if (node) this.beginInlineRenameAgent(a, node);
-      }));
+      }, { icon: 'pencil' }));
     }
 
     items.push(mkSep());
@@ -1268,8 +1648,8 @@ export class AgentsSidebar {
 
     if (moveTargets.length > 0 || currentFolder) {
       const heading = bulk ? `Move ${targetAgents.length} to` : 'Move to';
-      items.push(el('div', { class: 'ctx-menu__heading' }, heading) as HTMLElement);
-      items.push(mkItem(`(no folder)${!bulk && !currentFolder ? '  •' : ''}`, async () => {
+      items.push(el('div', { class: 'ctx-sheet__heading' }, heading) as HTMLElement);
+      items.push(mkItem('Top level', async () => {
         try {
           await Promise.all(targetAgents.map((x) => api.agents.setFolder(x.id, null)));
           await this.refreshFolders();
@@ -1278,10 +1658,9 @@ export class AgentsSidebar {
           const msg = e instanceof Error ? e.message : String(e);
           alert(`move failed: ${msg}`);
         }
-      }));
+      }, { icon: 'inbox', current: !bulk && !currentFolder }));
       for (const f of moveTargets) {
-        const label = (!bulk && currentFolder === f.id) ? `${f.name}  •` : f.name;
-        items.push(mkItem(label, async () => {
+        items.push(mkItem(f.name, async () => {
           try {
             await Promise.all(targetAgents.map((x) => api.agents.setFolder(x.id, f.id)));
             await this.refreshFolders();
@@ -1290,7 +1669,7 @@ export class AgentsSidebar {
             const msg = e instanceof Error ? e.message : String(e);
             alert(`move failed: ${msg}`);
           }
-        }));
+        }, { icon: 'folder', current: !bulk && currentFolder === f.id }));
       }
       items.push(mkSep());
     }
@@ -1312,7 +1691,7 @@ export class AgentsSidebar {
         const msg = e instanceof Error ? e.message : String(e);
         alert(`archive failed: ${msg}`);
       }
-    }));
+    }, { icon: 'archive' }));
 
     if (!bulk) {
       items.push(mkItem('Copy id', async () => {
@@ -1330,7 +1709,7 @@ export class AgentsSidebar {
         } catch {
           alert('copy failed');
         }
-      }));
+      }, { icon: 'copy' }));
     }
 
     items.push(mkSep());
@@ -1356,31 +1735,36 @@ export class AgentsSidebar {
         const msg = e instanceof Error ? e.message : String(e);
         alert(`delete failed: ${msg}`);
       }
-    }, { danger: true }));
+    }, { danger: true, icon: 'trash' }));
+
+    const title = bulk
+      ? `${targetAgents.length} conversations`
+      : (a.name || a.id.slice(0, 8));
+    const kicker = bulk ? 'Selected' : 'Conversation';
 
     const menu = el('div', {
-      class: 'ctx-menu',
-      role: 'menu',
-      // Stop bubbling so the document-level dismiss listener does not fire
-      // when clicking inside the menu itself.
+      class: 'tui-sheet ctx-sheet',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': title,
       onclick: (ev: MouseEvent) => ev.stopPropagation(),
       oncontextmenu: (ev: MouseEvent) => { ev.preventDefault(); this._closeContextMenu(); },
-    }, ...items) as HTMLElement;
+    },
+      el('div', {
+        class: 'tui-sheet__backdrop ctx-sheet__backdrop',
+        onclick: () => this._closeContextMenu(),
+      }),
+      el('div', { class: 'ctx-sheet__card' },
+        el('div', { class: 'ctx-sheet__handle', 'aria-hidden': 'true' }),
+        el('header', { class: 'ctx-sheet__head' },
+          el('p', { class: 'ctx-sheet__kicker' }, kicker),
+          el('h2', { class: 'ctx-sheet__title' }, title),
+        ),
+        el('div', { class: 'ctx-sheet__list', role: 'menu' }, ...items),
+      ),
+    ) as HTMLElement;
 
-    // Position offscreen first so we can measure and clamp.
-    menu.style.position = 'fixed';
-    menu.style.left = '-9999px';
-    menu.style.top  = '-9999px';
     document.body.appendChild(menu);
-
-    const rect = menu.getBoundingClientRect();
-    const margin = 6;
-    const maxX = window.innerWidth  - rect.width  - margin;
-    const maxY = window.innerHeight - rect.height - margin;
-    const x = Math.max(margin, Math.min(clientX, maxX));
-    const y = Math.max(margin, Math.min(clientY, maxY));
-    menu.style.left = `${x}px`;
-    menu.style.top  = `${y}px`;
     this._ctxMenu = menu;
 
     const onDocPointerDown = (ev: PointerEvent): void => {
@@ -1395,7 +1779,11 @@ export class AgentsSidebar {
       this._closeContextMenu();
     };
     const onKey = (ev: KeyboardEvent): void => {
-      if (ev.key === 'Escape') { ev.preventDefault(); this._closeContextMenu(); }
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this._closeContextMenu();
+      }
     };
     // Fire on the *next* tick so the contextmenu event that opened us does
     // not immediately close it.

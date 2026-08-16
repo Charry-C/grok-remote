@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fmtTokens } from '../src/lib/format.js';
+import { fmtTokens, fmtUsd, fmtUsdFromTicks, USD_TICKS_PER_DOLLAR } from '../src/lib/format.js';
 
 test('fmtTokens returns empty string for non-positive values', () => {
   assert.equal(fmtTokens(0), '');
@@ -33,4 +33,21 @@ test('fmtTokens uses M for 1M and above, stripping trailing .0', () => {
   assert.equal(fmtTokens(1_000_000), '1M');
   assert.equal(fmtTokens(2_500_000), '2.5M');
   assert.equal(fmtTokens(10_000_000), '10M');
+});
+
+test('fmtUsdFromTicks uses 1 USD = 10^10 ticks', () => {
+  assert.equal(USD_TICKS_PER_DOLLAR, 10_000_000_000);
+  assert.equal(fmtUsdFromTicks(126890500), '$0.0127');
+  assert.equal(fmtUsdFromTicks(952567800), '$0.0953');
+  assert.equal(fmtUsdFromTicks(1_193_780_800), '$0.1194');
+  assert.equal(fmtUsdFromTicks(10_000_000_000), '$1.00');
+  assert.equal(fmtUsdFromTicks(0), '$0');
+  assert.equal(fmtUsdFromTicks(-1), '');
+});
+
+test('fmtUsd picks precision from magnitude', () => {
+  assert.equal(fmtUsd(0), '$0');
+  assert.equal(fmtUsd(0.01268905), '$0.0127');
+  assert.equal(fmtUsd(0.095), '$0.095');
+  assert.equal(fmtUsd(1.2), '$1.20');
 });

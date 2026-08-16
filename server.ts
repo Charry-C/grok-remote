@@ -1317,6 +1317,9 @@ function handleStream(req: IncomingMessage, res: ServerResponse, id: string): vo
   };
   let endView: () => void = () => {};
   unsub = manager.subscribe(id, (ev) => {
+    // sseWrite returns false only when the socket is already dead.
+    // A false from Node's res.write() used to mean backpressure and
+    // incorrectly tore the EventSource down mid-turn.
     if (!sseWrite(res, ev)) cleanup();
   });
   endView = manager.beginView(id);
@@ -1357,6 +1360,11 @@ const server = http.createServer(async (req: IncomingMessage, res: ServerRespons
     }
   }
 });
+
+// SSE streams stay open for the life of a chat tab. Node 18+ defaults
+// requestTimeout to 5 minutes and would otherwise kill every idle EventSource.
+server.requestTimeout = 0;
+server.headersTimeout = 0;
 
 if (!NO_LISTEN) {
   const retention = startRetentionTimer({ getSettings: loadSettings, manager: manager as never });

@@ -15,6 +15,107 @@ export const REASONING_EFFORTS: readonly ReasoningEffortOption[] = [
   { id: 'xhigh', label: 'xhigh' },
 ];
 
+const EFFORT_LOW: ReasoningEffortOption = { id: 'low', label: 'low' };
+const EFFORT_MEDIUM: ReasoningEffortOption = { id: 'medium', label: 'med' };
+const EFFORT_HIGH: ReasoningEffortOption = { id: 'high', label: 'high' };
+const EFFORT_XHIGH: ReasoningEffortOption = { id: 'xhigh', label: 'xhigh' };
+
+/** Canonical rank used to clamp an unsupported effort to the nearest valid one. */
+const EFFORT_RANK: readonly string[] = [
+  'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+];
+
+const GROK_45_EFFORTS: readonly ReasoningEffortOption[] = [
+  EFFORT_LOW, EFFORT_MEDIUM, EFFORT_HIGH,
+];
+
+const GROK_46_EFFORTS: readonly ReasoningEffortOption[] = [
+  EFFORT_LOW, EFFORT_MEDIUM, EFFORT_HIGH, EFFORT_XHIGH,
+];
+
+function fallbackEffort(ids: readonly string[]): string {
+  if (ids.includes('high')) return 'high';
+  return ids.length ? ids[ids.length - 1]! : '';
+}
+
+export interface GrokModelVersion {
+  major: number;
+  minor: number;
+}
+
+function modelBaseId(id: string | null | undefined): string {
+  if (id == null) return '';
+  const raw = String(id).trim();
+  if (!raw) return '';
+  const slash = raw.lastIndexOf('/');
+  return (slash >= 0 ? raw.slice(slash + 1) : raw).toLowerCase();
+}
+
+/** Parse grok-4.5 / grok-4.6 / grok-4.20-multi-agent style ids. */
+export function grokModelVersion(id: string | null | undefined): GrokModelVersion | null {
+  const base = modelBaseId(id);
+  if (!base) return null;
+  const m = base.match(/^grok[-_]?(\d+)(?:\.(\d+))?/i);
+  if (!m) return null;
+  return { major: Number(m[1]), minor: m[2] != null ? Number(m[2]) : 0 };
+}
+
+/**
+ * Reasoning depths the picker should offer for a model.
+ *
+ * Official xAI menus (cannot be disabled):
+ *   grok-4.5 → low / medium / high
+ *   grok-4.6 and later → low / medium / high / xhigh
+ * Unknown ids keep the full canonical list so custom models stay pickable.
+ */
+export function effortsForModel(id: string | null | undefined): readonly ReasoningEffortOption[] {
+  const ver = grokModelVersion(id);
+  if (!ver) return REASONING_EFFORTS;
+  if (ver.major > 4 || (ver.major === 4 && ver.minor >= 6)) return GROK_46_EFFORTS;
+  if (ver.major === 4 && ver.minor === 5) return GROK_45_EFFORTS;
+  return REASONING_EFFORTS;
+}
+
+/** True when `effort` is in the model's advertised menu. */
+export function modelSupportsEffort(
+  id: string | null | undefined,
+  effort: string | null | undefined,
+): boolean {
+  const want = effort == null ? '' : String(effort).trim();
+  if (!want) return false;
+  return effortsForModel(id).some((opt) => opt.id === want);
+}
+
+/**
+ * Map an effort onto the model's menu. Empty input becomes `high` when that
+ * level exists (xAI default); otherwise the last advertised level.
+ * An out-of-range value (xhigh on 4.5, none on 4.6) snaps to the nearest rank.
+ */
+export function clampReasoningEffort(
+  id: string | null | undefined,
+  effort: string | null | undefined,
+): string {
+  const options = effortsForModel(id);
+  if (!options.length) return '';
+  const ids = options.map((opt) => opt.id);
+  const want = effort == null ? '' : String(effort).trim();
+  if (want && ids.includes(want)) return want;
+  if (!want) return fallbackEffort(ids);
+  const wantRank = EFFORT_RANK.indexOf(want);
+  if (wantRank < 0) return fallbackEffort(ids);
+  let best = fallbackEffort(ids);
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const optId of ids) {
+    const rank = EFFORT_RANK.indexOf(optId);
+    const dist = rank < 0 ? 999 : Math.abs(rank - wantRank);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = optId;
+    }
+  }
+  return best;
+}
+
 export interface ModelAgentLike {
   model?: string | null;
   reasoningEffort?: string | null;
