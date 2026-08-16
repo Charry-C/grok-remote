@@ -29,7 +29,7 @@ test('icon registry covers the rail-required names', () => {
   // These are the icon names src/main.ts and src/views/system/index.ts depend
   // on for the left rail and settings sidebar. If any of them is missing the
   // rail renders as a blank stripe.
-  const required = ['home', 'mcp', 'memory', 'models', 'leaders', 'settings'];
+  const required = ['home', 'mcp', 'memory', 'models', 'leaders', 'settings', 'gear', 'plus', 'send', 'mic', 'stop', 'chevron-down'];
   for (const name of required) {
     assert.ok(iconHtml(name).length > 0, `expected icon "${name}" to be registered`);
   }

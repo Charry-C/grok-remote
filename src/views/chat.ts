@@ -6,7 +6,8 @@
 //   2. thinking pane (collapsed) from agent_thought_chunk
 //   3. tool_call cards, patched by tool_call_update + tool_call_delta_chunk
 //   4. assistant message from agent_message_chunk
-//   5. token-usage footer from prompt_complete
+//   5. token-usage footer from prompt_result / turn_completed
+//      (prompt_complete closes the turn; usage often arrives a beat later)
 //
 // Plus: available_commands_update, session_summary_generated,
 //       _x.ai/session_notification (toast), error (red banner).
@@ -18,6 +19,7 @@ import { mountFilesTab, unmountFilesTab } from './files';
 import { mountTraceTab, unmountTraceTab } from './trace';
 import { mountScoped as mountFlowTab, unmount as unmountFlowTab } from './system/flow';
 import attachSlashPalette from '../lib/slash-palette';
+import { saveLastAgent } from '../lib/last-agent';
 import { setupImageAttach } from '../lib/attach-images';
 import {
   el,
@@ -33,14 +35,45 @@ import {
   renderToast,
   renderMarkdownLight,
 } from '../lib/render';
-import { unwrap, extractText } from '../lib/acp-payload.js';
+import { unwrap, extractText, errorBannerText } from '../lib/acp-payload.js';
+import {
+  extractTokenMeta,
+  hasTokenUsage,
+  mergeTokenMeta,
+  isTurnCompletedPayload,
+} from '../lib/token-usage';
+import {
+  eventTimeMs,
+  hasMatchingUserTurn,
+  isNonTextUserContent,
+  isReplayPayload,
+  isStaleLiveEvent,
+  shouldRenderUserBubble,
+  userTextsMatch,
+} from '../lib/chat-turns';
 import { copyToClipboard, serializeConversation, serializeResumeCommand } from '../lib/copy';
 import { iconHtml } from '../lib/icons';
 import { fmtTokens } from '../lib/format';
+import { contextFromAgent } from '../lib/topbar';
 import { playIntro } from '../lib/intro-animation';
+import { pickComposerChips, composerCanSend, insertComposerCommand } from '../lib/composer-chips';
+import {
+  formatModelChip,
+  modelSwitchGate,
+  prettyModelId,
+  resolveAgentEffort,
+  resolveAgentModel,
+} from '../lib/model-label';
+
+function speechRecognitionCtor(): (new () => any) | null {
+  if (typeof window === 'undefined') return null;
+  const w = window as any;
+  return w.SpeechRecognition || w.webkitSpeechRecognition || null;
+}
 
 export class ChatView {
   static _toolsToggleWired: any;
+  static _topbarWired: any;
   static _active: any;
   _activeTodoCard!: any;
   _autoScroll!: any;
@@ -52,11 +85,20 @@ export class ChatView {
   _bgTermViewerTimer!: any;
   _chatIntroAbort!: any;
   _chatIntroEl!: any;
+  _composerEnabled!: any;
+  _dictating!: any;
+  _recognition!: any;
+  _sendIco!: any;
+  _sendLabel!: any;
+  _suggestPinned!: any;
+  _turnInFlight!: any;
   _chatSplit!: any;
   _chatSplitBuild!: any;
   _chatSplitCollapsed!: any;
   _chatSplitLastSizes!: any;
   _convoSkills!: any;
+  _composerFocused!: any;
+  _connectPromise!: any;
   _detachAutoScroll!: any;
   _detachPalette!: any;
   _easedScrollPending!: any;
@@ -65,6 +107,7 @@ export class ChatView {
   _easedToolsRaf!: any;
   _easedToolsTarget!: any;
   _historyAll!: any;
+  _historyWatermark!: any;
   _inFlightMap!: any;
   _inFlightTimer!: any;
   _isReplaying!: any;
@@ -76,8 +119,8 @@ export class ChatView {
   _lastPayload!: any;
   _lastRenderedTokens!: any;
   _lastServerEcho!: any;
-  _modelDatalist!: any;
-  _modelSuggestions!: any;
+  _modelDisplayNames!: Map<string, string>;
+  _modelSwitching!: boolean;
   _onAgentsRefresh!: any;
   _onSettingsChange!: any;
   _onVisibility!: any;
@@ -104,12 +147,17 @@ export class ChatView {
   bgTermsStripEl!: any;
   chatSplitEl!: any;
   composerAttachBtn!: any;
+  composerAttachSlot!: any;
   composerCancel!: any;
+  composerCard!: any;
   composerDebugBtn!: any;
   composerEl!: any;
   composerFileInput!: any;
   composerHint!: any;
+  composerMicBtn!: any;
   composerSend!: any;
+  composerModelBtn!: any;
+  composerSuggestEl!: any;
   composerTa!: any;
   connectBtn!: any;
   convoSkillsStripEl!: any;
@@ -145,15 +193,24 @@ export class ChatView {
   traceMounted!: any;
   tracePane!: any;
   turns!: any;
-  _connectPromise!: any;
+  _pendingUsage!: any;
 
   constructor() {
     this.agentId = null;
     this.stream  = null;
-    this.turns   = []; // each: { user, thinking, tools[], assistant, footer, root }
+    this.turns   = []; // each: { user, thinking, tools[], assistant, footer, usageMeta, root }
     this.activeTurn = null;
+    this._pendingUsage = null;
     this.availableCommands = [];
     this.tabsState = 'conversation';
+    this._composerEnabled = false;
+    this._suggestPinned = false;
+    this._dictating = false;
+    this._recognition = null;
+    this._historyWatermark = null;
+    this._composerFocused = false;
+    this._turnInFlight = false;
+    this._connectPromise = null;
 
     // Lazy cache of known skill names (set of strings). Populated on first
     // user message that starts with `/`. Drives the "invoked skill" banner
@@ -190,7 +247,8 @@ export class ChatView {
     // when the user clicks the gear icon so the DOM cost is zero otherwise.
     this.settingsDrawer = null;
     this.settingsDrawerOpen = false;
-    this._modelSuggestions = null;
+    this._modelDisplayNames = new Map();
+    this._modelSwitching = false;
 
     this.empty = el('div', { class: 'chat-empty' },
       el('div', { class: 'chat-empty-headline' }, 'no conversation selected'),
@@ -206,7 +264,7 @@ export class ChatView {
               const collapsed = (localStorage.getItem('grok-remote.split.sidebar.collapsed') === '1');
               if (collapsed) document.dispatchEvent(new CustomEvent('grok-remote:sidebar-toggle'));
             } catch { /* ignore */ }
-            document.body.setAttribute('data-drawer-open', '1');
+            document.dispatchEvent(new CustomEvent('grok-remote:open-drawer'));
           },
         }, 'Select conversation'),
         el('button', {
@@ -275,11 +333,15 @@ export class ChatView {
     this._attachComposerExtras();
     this._initAutoScroll();
 
-    // visibility change -> refresh history on becoming visible
+    // Tab hidden/closed must not cancel the server turn. On return, reattach
+    // the live stream. Only replay disk history when nothing is in flight.
     this._onVisibility = () => {
-      if (document.visibilityState === 'visible' && this.agentId) {
-        this.refreshHistory().catch(() => {});
-      }
+      if (document.visibilityState !== 'visible' || !this.agentId) return;
+      const live = !this.stream || this.stream.isClosed() || this.stream.readyState() === 2;
+      if (live) this.openStreamForCurrent();
+      if (this.currentAgent) this._ensureConnected(this.currentAgent);
+      const running = this.currentAgent && this.currentAgent.status === 'running';
+      if (!running) this.refreshHistory().catch(() => {});
     };
     document.addEventListener('visibilitychange', this._onVisibility);
 
@@ -331,6 +393,18 @@ export class ChatView {
     document.dispatchEvent(new CustomEvent('grok-remote:tools-state', {
       detail: { collapsed: !!this._chatSplitCollapsed },
     }));
+    if (!ChatView._topbarWired) {
+      document.addEventListener('grok-remote:open-agent-settings', () => {
+        if (ChatView._active) ChatView._active.openSettingsDrawer();
+      });
+      ChatView._topbarWired = true;
+    }
+  }
+
+  _publishTopbarContext() {
+    document.dispatchEvent(new CustomEvent('grok-remote:topbar-context', {
+      detail: contextFromAgent(this.currentAgent),
+    }));
   }
 
   destroy() {
@@ -372,7 +446,7 @@ export class ChatView {
       onclick: () => this.switchTab(key),
     }, label);
     this.tabBtns = {
-      conversation: make('conversation', 'Conversation'),
+      conversation: make('conversation', 'Chat'),
       files:        make('files',        'Files'),
       info:         make('info',         'Info'),
       trace:        make('trace',        'Trace'),
@@ -391,8 +465,8 @@ export class ChatView {
     const settingsBtn = el('button', {
       class: 'chat-settings tab-action tab-action--icon-only',
       type: 'button',
-      title: 'Per-conversation grok settings (model, reasoning effort, rules, ...)',
-      'aria-label': 'open settings drawer',
+      title: 'Agent settings (name, rules, tools, ...)',
+      'aria-label': 'open agent settings',
       onclick: () => this.toggleSettingsDrawer(),
     });
     settingsBtn.innerHTML = `<span class="tab-action-ico">${iconHtml('settings')}</span>`;
@@ -445,8 +519,8 @@ export class ChatView {
   }
 
   _renderTokensPill() {
-    // Prefer the live value from prompt_complete / streaming updates over the
-    // snapshot we got at setAgent time.
+    // Prefer the live value from prompt_result / turn_completed / streaming
+    // updates over the snapshot we got at setAgent time.
     const live = (typeof this.latestTotalTokens === 'number') ? this.latestTotalTokens : null;
     const snap = this.currentAgent && this.currentAgent.totalTokens;
     const t = (typeof live === 'number' && live > 0) ? live : (typeof snap === 'number' ? snap : 0);
@@ -498,11 +572,7 @@ export class ChatView {
   async toggleConnection() {
     if (!this.agentId) return;
     const a = this.currentAgent;
-    const disconnected = !!(a && (a.status === 'disconnected' || a.status === 'exited' || a.status === 'observed'));
-    if (disconnected && this._heldByTui(a)) {
-      this.showToast('TUI is using this session. Leave the terminal chat first.', 'warn');
-      return;
-    }
+    const disconnected = !!(a && (a.status === 'disconnected' || a.status === 'exited'));
     this.connectBtn.disabled = true;
     try {
       if (disconnected) {
@@ -527,8 +597,10 @@ export class ChatView {
   applyAgentRefresh(a: any) {
     if (!a || a.id !== this.agentId) return;
     this.currentAgent = a;
+    this._publishTopbarContext();
     this._syncConnectBtn();
     this._syncStarBtn();
+    this._setTurnBusyFromAgent(a);
     this._syncHeldBy(a);
     this._ensureConnected(a);
     // Re-render info tab if visible so status/sessionId etc. stay current.
@@ -537,6 +609,25 @@ export class ChatView {
     if (this.settingsDrawerOpen) this._updateSettingsNotice(a);
     this._renderTokensPill();
     this._renderInflightPill();
+    this._syncModelChip();
+  }
+
+  _setTurnBusyFromAgent(a: any) {
+    if (!a) {
+      this._turnInFlight = false;
+      this._syncComposerBar();
+      return;
+    }
+    const dead = a.status === 'disconnected' || a.status === 'exited'
+      || a.status === 'killed' || a.status === 'errored' || a.status === 'observed';
+    if (dead) {
+      this._turnInFlight = false;
+    } else if (a.status === 'running' || (typeof a.inFlight === 'number' && a.inFlight > 0)) {
+      this._turnInFlight = true;
+    } else if (!this.activeTurn) {
+      this._turnInFlight = false;
+    }
+    this._syncComposerBar();
   }
 
   _heldByTui(agent: any): boolean {
@@ -617,7 +708,7 @@ export class ChatView {
   _syncConnectBtn() {
     if (!this.connectBtn) return;
     const a = this.currentAgent;
-    const disconnected = !!(a && (a.status === 'disconnected' || a.status === 'exited' || a.status === 'observed'));
+    const disconnected = !!(a && (a.status === 'disconnected' || a.status === 'exited'));
     this.connectBtn.textContent = disconnected ? 'connect' : 'disconnect';
     this.connectBtn.classList.toggle('tab-action--off', disconnected);
     this.connectBtn.title = disconnected
@@ -696,7 +787,7 @@ export class ChatView {
     }
 
     // Flow tab: scoped to just this conversation's agent. Lazily mounts
-    // the Flow tab's ReactFlow component with a
+    // the same ReactFlow component as the global #/flow page but with a
     // filterIds prop so only this agent's node + tool-call satellites show.
     if (key === 'flow') {
       if (this.agentId) {
@@ -728,28 +819,37 @@ export class ChatView {
     }
   }
 
+  // Back-compat alias for older call sites. New code should use
+  // focusConversation().
+  beginNewConversation() { this.focusConversation(); }
+
   buildComposer() {
     const ta = el('textarea', {
       class: 'composer-input',
-      rows: '3',
-      placeholder: 'message the agent.  enter to send, shift+enter for newline.  type / for commands.',
+      rows: '1',
+      placeholder: 'Message the agent…',
       onkeydown: (ev: any) => {
-        if (ev.key === 'Enter' && !ev.shiftKey) {
+        // Phones + CJK IMEs: Enter should be a newline. Tap Send instead.
+        if (this._isChatMobile()) return;
+        if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
           ev.preventDefault();
           this.send();
         }
       },
+      oninput: () => {
+        this._autosizeComposer();
+        this._syncComposerBar();
+      },
+      onfocus: () => {
+        this._composerFocused = true;
+        this._renderComposerSuggest();
+      },
+      onblur: () => {
+        this._composerFocused = false;
+        this._renderComposerSuggest();
+      },
     });
-    const sendBtn = el('button', {
-      class: 'btn btn--primary composer-send',
-      onclick: () => this.send(),
-    }, 'send');
-    const cancelBtn = el('button', {
-      class: 'btn btn--ghost composer-cancel',
-      onclick: () => this.cancel(),
-    }, 'cancel turn');
 
-    // Hidden file input used by the "attach image" button.
     const fileInput = el('input', {
       type: 'file',
       class: 'composer-file-input',
@@ -757,46 +857,99 @@ export class ChatView {
       multiple: '',
       style: { display: 'none' },
     });
+
     const attachBtn = el('button', {
-      class: 'btn btn--ghost composer-attach',
+      class: 'composer-icon-btn composer-attach',
+      type: 'button',
       title: 'Attach image (saved to agent uploads/ folder)',
+      'aria-label': 'Attach image',
+      html: iconHtml('plus'),
       onclick: (ev: any) => { ev.preventDefault(); fileInput.click(); },
-    }, 'attach image');
+    });
+
+    const modelBtn = el('button', {
+      class: 'composer-mode-btn composer-model-btn',
+      type: 'button',
+      title: 'Select model and reasoning effort',
+      'aria-label': 'Select model and reasoning effort',
+      'aria-haspopup': 'dialog',
+      onclick: (ev: any) => { ev.preventDefault(); this._openModelSheet(); },
+    },
+      el('span', { class: 'composer-mode-ico', html: iconHtml('models') }),
+      el('span', { class: 'composer-mode-label' }, 'Model'),
+      el('span', { class: 'composer-mode-caret', html: iconHtml('chevron-down') }),
+    );
 
     const debugBtn = el('button', {
-      class: 'btn btn--ghost composer-debug',
+      class: 'composer-icon-btn composer-debug',
       type: 'button',
       title: 'Preview the exact JSON payload that will be sent (composer + attachments), plus the last server-composed prompt if one exists.',
+      'aria-label': 'Inspect payload',
       onclick: (ev: any) => { ev.preventDefault(); this.openPayloadInspector(); },
-    }, '{ payload }');
-    // Hidden by default; surfaced when settings.debug is true.
+    }, '{ }');
     debugBtn.hidden = true;
-    this.composerDebugBtn = debugBtn;
 
-    // Caption row used to show the slash-command hint after a commit.
+    const sendIco = el('span', { class: 'composer-send-ico', html: iconHtml('send') });
+    const sendLabel = el('span', { class: 'composer-send-label' }, 'Send');
+    const sendBtn = el('button', {
+      class: 'composer-send-btn composer-send',
+      type: 'button',
+      title: 'Send',
+      'aria-label': 'Send',
+      onclick: () => {
+        if (this._turnInFlight) this.cancel();
+        else this.send();
+      },
+    }, sendIco, sendLabel);
+
     const hintCaption = el('div', { class: 'composer-hint hidden' });
+    const suggestRow = el('div', { class: 'composer-suggest' });
+    suggestRow.hidden = true;
+    const attachSlot = el('div', { class: 'composer-attach-slot' });
 
-    this.composerTa        = ta;
-    this.composerSend      = sendBtn;
-    this.composerCancel    = cancelBtn;
-    this.composerFileInput = fileInput;
-    this.composerAttachBtn = attachBtn;
-    this.composerHint      = hintCaption;
-    // Kept around (hidden) for back-compat with any leftover CSS hooks; the
-    // new slash-palette module creates its own floating panel.
+    this.composerTa         = ta;
+    this.composerSend       = sendBtn;
+    this._sendIco           = sendIco;
+    this._sendLabel         = sendLabel;
+    const chat = this;
+    this.composerCancel     = {
+      get disabled() { return !chat._turnInFlight; },
+      set disabled(v: boolean) {
+        chat._turnInFlight = !v;
+        chat._syncComposerBar();
+      },
+    };
+    this.composerFileInput  = fileInput;
+    this.composerAttachBtn  = attachBtn;
+    this.composerHint       = hintCaption;
+    this.composerDebugBtn   = debugBtn;
+    this.composerModelBtn   = modelBtn;
+    this.composerMicBtn     = null;
+    this.composerSuggestEl  = suggestRow;
+    this.composerAttachSlot = attachSlot;
     this.palette = el('div', { class: 'command-palette hidden' });
+
+    this.composerCard = el('div', { class: 'composer-card' },
+      attachSlot,
+      hintCaption,
+      ta,
+      el('div', { class: 'composer-bar' },
+        el('div', { class: 'composer-bar-left' },
+          attachBtn,
+          modelBtn,
+          debugBtn,
+        ),
+        el('div', { class: 'composer-bar-right' },
+          sendBtn,
+        ),
+      ),
+      fileInput,
+    );
 
     return el('div', { class: 'composer' },
       this.palette,
-      hintCaption,
-      ta,
-      el('div', { class: 'composer-actions' },
-        attachBtn,
-        debugBtn,
-        fileInput,
-        cancelBtn,
-        sendBtn,
-      ),
+      suggestRow,
+      this.composerCard,
     );
   }
 
@@ -827,15 +980,19 @@ export class ChatView {
 
     this.imageAttach = setupImageAttach({
       container: this.composerEl,
+      pillsHost: this.composerAttachSlot || this.composerEl,
       textarea: this.composerTa,
       fileInput: this.composerFileInput,
       canAttachImages: () => this._canAttachImages(),
       onChange: ({ error }) => {
         if (error) this.showToast(error, 'warn');
         this._syncAttachBtn();
+        this._syncComposerBar();
       },
     });
     this._syncAttachBtn();
+    this._syncComposerBar();
+    this._renderComposerSuggest();
   }
 
   _canAttachImages() {
@@ -870,10 +1027,12 @@ export class ChatView {
         }
         this._knownSkills = set;
         this._skillCommands = palette;
+        this._renderComposerSuggest();
         return set;
       } catch {
         this._knownSkills = new Set();
         this._skillCommands = [];
+        this._renderComposerSuggest();
         return this._knownSkills;
       }
     })();
@@ -948,13 +1107,14 @@ export class ChatView {
 
   _syncAttachBtn() {
     if (!this.composerAttachBtn) return;
-    this.composerAttachBtn.disabled = false;
-    this.composerAttachBtn.classList.remove('is-disabled');
+    this.composerAttachBtn.disabled = !this._composerEnabled;
+    this.composerAttachBtn.classList.toggle('is-disabled', !this._composerEnabled);
   }
 
   setAvailableCommands(list: any) {
     if (!Array.isArray(list)) return;
     this.availableCommands = list;
+    this._renderComposerSuggest();
   }
 
   _mergedCommands() {
@@ -976,10 +1136,222 @@ export class ChatView {
   }
 
   _setComposerEnabled(enabled: any) {
+    this._composerEnabled = !!enabled;
     if (!this.composerTa) return;
     this.composerTa.disabled = !enabled;
-    this.composerSend.disabled = !enabled;
-    this.composerCancel.disabled = enabled; // only enable mid-turn... toggled in send()
+    if (this.composerMicBtn) this.composerMicBtn.disabled = !enabled;
+    if (this.composerAttachBtn) this.composerAttachBtn.disabled = !enabled;
+    if (!enabled) {
+      this.composerCancel.disabled = true;
+      this._stopDictation();
+    }
+    this._syncModelChip();
+    this._syncComposerBar();
+  }
+
+  _syncComposerBar() {
+    if (!this.composerSend) return;
+    const busy = !!this._turnInFlight;
+    this.composerSend.classList.toggle('composer-send--busy', busy);
+    this.composerSend.title = busy ? 'Stop the current turn' : 'Send';
+    this.composerSend.setAttribute('aria-label', busy ? 'Stop' : 'Send');
+    if (this._sendIco) this._sendIco.innerHTML = iconHtml(busy ? 'stop' : 'send');
+    if (this._sendLabel) this._sendLabel.textContent = busy ? 'Stop' : 'Send';
+    this._syncModelChip();
+    if (busy) {
+      this.composerSend.disabled = !this._composerEnabled;
+      return;
+    }
+    const text = this.composerTa ? this.composerTa.value : '';
+    const n = this.imageAttach ? this.imageAttach.getAttachments().length : 0;
+    this.composerSend.disabled = !this._composerEnabled || !composerCanSend(text, n);
+  }
+
+  _renderComposerSuggest() {
+    const row = this.composerSuggestEl as HTMLElement | null;
+    if (!row) return;
+    const hasTurns = Array.isArray(this.turns) && this.turns.length > 0;
+    const chips = pickComposerChips(this._mergedCommands(), 6);
+    if (!this._composerEnabled || !chips.length || (hasTurns && !this._suggestPinned)) {
+      row.replaceChildren();
+      row.hidden = true;
+      return;
+    }
+    if (this._isChatMobile() && !this._composerFocused) {
+      row.replaceChildren();
+      row.hidden = true;
+      return;
+    }
+    row.hidden = false;
+    row.replaceChildren();
+    for (const chip of chips) {
+      row.appendChild(el('button', {
+        class: 'composer-chip',
+        type: 'button',
+        title: chip.description || `/${chip.name}`,
+        onclick: () => this._insertComposerCommand(chip.name),
+      },
+        chip.kind === 'skill'
+          ? el('span', { class: 'composer-chip-ico', html: iconHtml('skills') })
+          : null,
+        el('span', null, `/${chip.name}`),
+      ));
+    }
+  }
+
+  _insertComposerCommand(name: string) {
+    if (!this.composerTa || this.composerTa.disabled) return;
+    const ta = this.composerTa as HTMLTextAreaElement;
+    ta.value = insertComposerCommand(ta.value, name);
+    try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch { /* ignore */ }
+    ta.focus();
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    this._autosizeComposer();
+    this._syncComposerBar();
+  }
+
+  _modelSwitchGate() {
+    return modelSwitchGate({
+      hasAgent: !!this.agentId,
+      composerEnabled: this._composerEnabled,
+      switching: this._modelSwitching,
+      inFlight: this._turnInFlight,
+      agent: this.currentAgent,
+    });
+  }
+
+  _syncModelChip() {
+    const btn = this.composerModelBtn as HTMLButtonElement | null;
+    if (!btn) return;
+    const modelId = resolveAgentModel(this.currentAgent);
+    const effort = resolveAgentEffort(this.currentAgent);
+    const displayName = (modelId && this._modelDisplayNames.get(modelId)) || '';
+    const label = formatModelChip({ modelId, effort, displayName });
+    const labelEl = btn.querySelector('.composer-mode-label');
+    if (labelEl) labelEl.textContent = label;
+    const gate = this._modelSwitchGate();
+    btn.disabled = gate.disabled;
+    const title = gate.reason
+      || (modelId
+        ? (prettyModelId(modelId) !== modelId ? `${label} (${modelId})` : label)
+        : 'Select model and reasoning effort');
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    btn.setAttribute('aria-disabled', gate.disabled ? 'true' : 'false');
+  }
+
+  _openModelSheet() {
+    const gate = this._modelSwitchGate();
+    if (gate.disabled) {
+      if (gate.reason) this.showToast(gate.reason, 'info');
+      return;
+    }
+    void import('./model-sheet.js').then((m) => m.openModelSheet({
+      currentModel: resolveAgentModel(this.currentAgent),
+      currentEffort: resolveAgentEffort(this.currentAgent),
+      onApply: (choice) => this._applyModelChoice(choice),
+    }));
+  }
+
+  async _applyModelChoice(choice: { model?: string; reasoningEffort?: string; displayName?: string }) {
+    if (!this.agentId) return;
+    const model = typeof choice.model === 'string' ? choice.model.trim() : '';
+    const reasoningEffort = typeof choice.reasoningEffort === 'string'
+      ? choice.reasoningEffort.trim()
+      : '';
+    if (choice.displayName && model) {
+      this._modelDisplayNames.set(model, choice.displayName);
+    }
+    if (!model && !reasoningEffort) return;
+
+    const gate = this._modelSwitchGate();
+    if (gate.disabled) {
+      this.showToast(gate.reason || 'Cannot switch models right now.', 'info');
+      return;
+    }
+
+    this._modelSwitching = true;
+    this._syncModelChip();
+    try {
+      const updated = await api.switchModel(this.agentId, {
+        ...(model ? { model } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+      });
+      this.applyAgentRefresh(updated);
+      if (model) {
+        api.patchSettings({ defaultModel: model }).catch(() => {});
+      }
+      this.showToast('switched model.', 'info');
+    } catch (e: any) {
+      this.showToast(`model switch failed: ${e && e.message ? e.message : String(e)}`, 'warn');
+    } finally {
+      this._modelSwitching = false;
+      this._syncModelChip();
+    }
+  }
+
+  _toggleDictation() {
+    if (this._dictating) {
+      this._stopDictation();
+      return;
+    }
+    const Ctor = speechRecognitionCtor();
+    if (!Ctor) {
+      this.showToast('Voice input is not supported in this browser', 'warn');
+      return;
+    }
+    if (!this._composerEnabled) return;
+    let rec: any;
+    try { rec = new Ctor(); }
+    catch {
+      this.showToast('Voice input is not supported in this browser', 'warn');
+      return;
+    }
+    rec.interimResults = true;
+    rec.continuous = true;
+    rec.lang = (typeof navigator !== 'undefined' && navigator.language) || 'en-US';
+    const ta = this.composerTa as HTMLTextAreaElement | null;
+    const base = ta ? ta.value : '';
+    const needsSpace = !!(base && !/\s$/.test(base));
+    rec.onresult = (ev: any) => {
+      if (!ta) return;
+      let said = '';
+      for (let i = 0; i < (ev.results ? ev.results.length : 0); i++) {
+        const piece = ev.results[i] && ev.results[i][0] && ev.results[i][0].transcript;
+        if (piece) said += piece;
+      }
+      ta.value = base + (needsSpace && said ? ' ' : '') + said;
+      this._autosizeComposer();
+      this._syncComposerBar();
+    };
+    rec.onerror = (ev: any) => {
+      const err = ev && ev.error;
+      if (err && err !== 'aborted' && err !== 'no-speech') {
+        this.showToast(err === 'not-allowed'
+          ? 'Microphone permission denied'
+          : `Voice input failed: ${err}`, 'warn');
+      }
+      this._stopDictation();
+    };
+    rec.onend = () => this._stopDictation();
+    this._recognition = rec;
+    this._dictating = true;
+    if (this.composerMicBtn) this.composerMicBtn.classList.add('is-listening');
+    try { rec.start(); }
+    catch (e: any) {
+      this._stopDictation();
+      this.showToast(e && e.message ? e.message : 'Voice input failed', 'warn');
+    }
+  }
+
+  _stopDictation() {
+    const rec = this._recognition;
+    this._recognition = null;
+    this._dictating = false;
+    if (this.composerMicBtn) this.composerMicBtn.classList.remove('is-listening');
+    if (!rec) return;
+    try { rec.onresult = null; rec.onerror = null; rec.onend = null; } catch { /* ignore */ }
+    try { rec.stop(); } catch { /* ignore */ }
   }
 
   setAgent(agent: any) {
@@ -990,6 +1362,7 @@ export class ChatView {
     if (this.toolsStreamEl) this.toolsStreamEl.replaceChildren();
     this.turns = [];
     this.activeTurn = null;
+    this._historyWatermark = null;
     // Fire-and-forget skill cache warmup so the banner can paint as soon
     // as a /name message lands. Harmless if the agent has none.
     this._loadSkills();
@@ -1003,6 +1376,11 @@ export class ChatView {
       this.composerHint.textContent = '';
     }
     if (this.imageAttach) this.imageAttach.clear();
+    this._suggestPinned = false;
+    this._stopDictation();
+    this._autosizeComposer();
+    this._syncComposerBar();
+    this._renderComposerSuggest();
     this._promptCapImage = false;
     this._syncAttachBtn();
     if (agent) this._captureAgentCaps(agent);
@@ -1032,6 +1410,7 @@ export class ChatView {
     if (!agent || !agent.id) {
       this.agentId = null;
       this.currentAgent = null;
+      saveLastAgent(null);
       this.streamEl.appendChild(this.empty);
       this.infoPane.replaceChildren(el('div', { class: 'pane-empty' }, 'no agent selected'));
       this.filesPane.replaceChildren();
@@ -1041,6 +1420,7 @@ export class ChatView {
         );
       }
       this._setComposerEnabled(false);
+      this._renderComposerSuggest();
       // Hide the star + connect buttons until an agent is loaded.
       if (this.starBtn)     this.starBtn.hidden = true;
       if (this.settingsBtn) this.settingsBtn.hidden = true;
@@ -1048,6 +1428,8 @@ export class ChatView {
       if (this.tokensPill)  this.tokensPill.hidden = true;
       if (this.inflightPill) this.inflightPill.hidden = true;
       this.closeSettingsDrawer();
+      this._publishTopbarContext();
+      this._syncModelChip();
       return;
     }
     if (this.starBtn)     this.starBtn.hidden = false;
@@ -1064,15 +1446,20 @@ export class ChatView {
     }
     this.agentId = agent.id;
     this.currentAgent = agent;
+    this._publishTopbarContext();
+    saveLastAgent(agent.id);
     this.latestTotalTokens = (agent && agent.totalTokens) || null;
     if (switchingAgent) this._lastRenderedTokens = 0;
     this._startBgTerminalsPolling();
-    this.composerCancel.disabled = true;
+    this._setComposerEnabled(!this._heldByTui(agent));
+    this._setTurnBusyFromAgent(agent);
     this._syncHeldBy(agent);
+    this._renderComposerSuggest();
     this._syncConnectBtn();
     this._renderTokensPill();
     this._renderInflightPill();
     this._syncStarBtn();
+    this._syncModelChip();
 
     if (this.tabsState === 'files') {
       mountFilesTab(this.filesPane, { id: this.agentId });
@@ -1331,32 +1718,34 @@ export class ChatView {
         this.streamEl.appendChild(this._buildLoadEarlierBanner(total - returned));
       }
       this._isReplaying = true;
+      let watermark = 0;
       try {
         for (const ev of events) {
           const name = ev.event || ev.type || ev.name;
           const data = ev.data || ev.payload || ev;
           if (!name) continue;
-          // Stash event timestamp so bubble renders pick up the real time
-          // rather than "now" during a history replay.
-          const t = Date.parse(ev.at);
+          if (isReplayPayload(data) || isReplayPayload(ev)) continue;
+          const t = eventTimeMs(ev) ?? eventTimeMs(data) ?? Date.parse(ev.at);
+          if (Number.isFinite(t) && t > watermark) watermark = t;
           if (Number.isFinite(t)) this._lastEventTs = t;
           this.handleEvent(name, data, { fromHistory: true });
         }
       } finally {
         this._isReplaying = false;
       }
+      this._historyWatermark = watermark || null;
       this._lastEventTs = null;
       // History replay may end with an unterminated turn (interrupted session,
       // or a prompt_complete that never made it to disk). Walk every turn and
       // finalize any thinking pane that is still in its active/blinking state
-      // so the dots stop animating. Then close out the final active turn so
-      // the assistant bubble is finalized too.
+      // so the dots stop animating. Leave activeTurn open so a mid-flight
+      // prompt can keep appending after the SSE watermark instead of opening
+      // a new empty YOU bubble.
       for (const turn of this.turns) {
         if (turn.thinking && typeof turn.thinking.finalize === 'function') {
           turn.thinking.finalize();
         }
       }
-      if (this.activeTurn) this.endTurn(null);
       // Scroll the stream to the bottom after a history load. Reset
       // auto-scroll: the user just opened the conversation, they want to be
       // at the latest message regardless of where the last session ended.
@@ -1365,6 +1754,7 @@ export class ChatView {
       requestAnimationFrame(() => {
         this.scrollToBottom({ force: true });
       });
+      this._renderComposerSuggest();
     } catch (e) {
       // backend may not implement history yet
     }
@@ -1407,10 +1797,13 @@ export class ChatView {
   }
 
   showStatus(text: any, kind?: any) {
+    const k = kind || 'idle';
     this.statusEl.replaceChildren(
-      el('span', { class: `status-pill status-pill--${kind || 'idle'}` }, '·'),
+      el('span', { class: `status-pill status-pill--${k}` }, '·'),
       el('span', { class: 'chat-status-text' }, text),
     );
+    this.statusEl.dataset.kind = k;
+    this.statusEl.classList.toggle('chat-status--quiet', k === 'ok' || k === 'idle');
   }
 
   showToast(text: any, kind?: any) {
@@ -1429,16 +1822,32 @@ export class ChatView {
     return this.startTurn('', { ts: this._lastEventTs || Date.now() });
   }
 
+  _fillUserOnTurn(turn: any, userText: any, attachments: any, ts: any) {
+    if (!turn || turn.user) return;
+    const bubble = renderUserBubble(userText, ts, {
+      attachments,
+      agentId: this.agentId,
+    });
+    if (!bubble) return;
+    turn.user = bubble;
+    turn.userText = userText || '';
+    turn.userAttachments = attachments || [];
+    turn.root.insertBefore(bubble, turn.root.firstChild);
+    this._decorateSkill(turn);
+  }
+
   startTurn(userText: any, opts?: any) {
     // A turn is about to land in the stream. Cancel the welcome animation
     // if it's still running so the figlet doesn't overlap the new bubble.
     this._cancelChatIntro();
     const ts = (opts && opts.ts) || Date.now();
     const attachments = Array.isArray(opts && opts.attachments) ? opts.attachments : [];
-    const userBubble = renderUserBubble(userText, ts, {
-      attachments,
-      agentId: this.agentId,
-    });
+    const userBubble = shouldRenderUserBubble(userText, attachments)
+      ? renderUserBubble(userText, ts, {
+          attachments,
+          agentId: this.agentId,
+        })
+      : null;
     // Only animate fresh insertions, never historical replay (that would
     // produce a chaotic shimmer across all replayed turns).
     const animate = !this._isReplaying && !(opts && opts.fromHistory);
@@ -1453,10 +1862,12 @@ export class ChatView {
       tools:     [],
       assistant: null,
       footer:    null,
+      usageMeta: null,
       root,
     };
     this.turns.push(turn);
     this.activeTurn = turn;
+    if (!(opts && opts.fromHistory)) this._renderComposerSuggest();
     // Decorate retroactively once the skill set is loaded. Idempotent.
     this._decorateSkill(turn);
     this.scrollToBottom();
@@ -1464,15 +1875,64 @@ export class ChatView {
   }
 
   endTurn(meta: any) {
-    if (!this.activeTurn) return;
-    if (this.activeTurn.thinking) this.activeTurn.thinking.finalize();
-    if (this.activeTurn.assistant) this.activeTurn.assistant.finalize();
-    const footer = renderTokenFooter(meta || {});
-    this.activeTurn.root.appendChild(footer);
-    this.activeTurn.footer = footer;
-    this.activeTurn = null;
-    this.composerCancel.disabled = true;
-    this.scrollToBottom();
+    const incoming = extractTokenMeta(meta) || (hasTokenUsage(meta) ? meta : null);
+    const merged = mergeTokenMeta(
+      mergeTokenMeta(this.activeTurn && this.activeTurn.usageMeta, this._pendingUsage),
+      incoming,
+    );
+    this._pendingUsage = null;
+
+    const target = this.activeTurn || this.turns[this.turns.length - 1] || null;
+    if (this.activeTurn) {
+      if (this.activeTurn.thinking) this.activeTurn.thinking.finalize();
+      if (this.activeTurn.assistant) this.activeTurn.assistant.finalize();
+      this._paintTurnFooter(this.activeTurn, merged);
+      this.activeTurn = null;
+      this.composerCancel.disabled = true;
+      this._syncComposerBar();
+      this.scrollToBottom();
+      return;
+    }
+    // prompt_result / turn_completed often land after prompt_complete has
+    // already closed the turn. Backfill the last footer's chips.
+    if (target) this._paintTurnFooter(target, merged);
+  }
+
+  _paintTurnFooter(turn: any, meta: any) {
+    if (!turn) return;
+    const next = mergeTokenMeta(turn.usageMeta, meta);
+    if (hasTokenUsage(next)) turn.usageMeta = next;
+    const total = next.totalTokens ?? next.total_tokens;
+    if (typeof total === 'number' && Number.isFinite(total)) {
+      this.latestTotalTokens = total;
+      this._renderTokensPill();
+      this._renderInflightPill();
+    }
+    // Don't replace a populated footer with an empty one (prompt_complete
+    // after a turn_completed that already filled the chips).
+    if (turn.footer && !hasTokenUsage(next)) return;
+    const footer = renderTokenFooter(next || {});
+    if (turn.footer && turn.footer.parentNode) {
+      turn.footer.replaceWith(footer);
+    } else if (turn.root) {
+      turn.root.appendChild(footer);
+    }
+    turn.footer = footer;
+  }
+
+  _ingestTurnUsage(payload: any) {
+    const meta = extractTokenMeta(payload);
+    if (!meta || !hasTokenUsage(meta)) return;
+    if (this.activeTurn) {
+      this.activeTurn.usageMeta = mergeTokenMeta(this.activeTurn.usageMeta, meta);
+      return;
+    }
+    const last = this.turns[this.turns.length - 1];
+    if (last) {
+      this._paintTurnFooter(last, meta);
+      return;
+    }
+    this._pendingUsage = mergeTokenMeta(this._pendingUsage, meta);
   }
 
   scrollToBottom(opts?: any) {
@@ -1825,6 +2285,15 @@ export class ChatView {
     return window.innerWidth <= ChatView.CHAT_SPLIT_MOBILE_MAX;
   }
 
+  _autosizeComposer() {
+    const ta = this.composerTa as HTMLTextAreaElement | null;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    const min = 24;
+    const next = Math.min(Math.max(ta.scrollHeight, min), 160);
+    ta.style.height = `${next}px`;
+  }
+
   _initChatSplit() {
     if (this._chatSplit) return;
     // Mobile: don't init Split.js. CSS stacks the tools column below the
@@ -1927,6 +2396,16 @@ export class ChatView {
     return group;
   }
 
+  _placeToolCard(turn: any, node: any) {
+    if (this._isChatMobile()) {
+      const before = (turn.assistant && turn.assistant.node) || turn.footer;
+      if (before) turn.root.insertBefore(node, before);
+      else turn.root.appendChild(node);
+      return;
+    }
+    this._ensureToolsGroup(turn).appendChild(node);
+  }
+
   _initAutoScroll() {
     this._autoScroll = true;
     this._autoScrollTools = true;
@@ -1937,12 +2416,15 @@ export class ChatView {
       type: 'button',
       class: 'jump-to-latest',
       hidden: true,
+      title: 'Jump to latest',
+      'aria-label': 'Jump to latest',
+      html: iconHtml('chevron-down'),
       onclick: () => {
         this._autoScroll = true;
         this.scrollToBottom({ force: true });
         this._jumpToLatestBtn.hidden = true;
       },
-    }, '↓ jump to latest');
+    });
     // Append once the user mounts. Defer to a microtask so the button lives
     // inside the conversation pane, not the stream itself.
     requestAnimationFrame(() => {
@@ -2352,6 +2834,9 @@ export class ChatView {
   // ── event dispatch ──────────────────────────────────────────────────
 
   handleEvent(name: any, payload: any, opts?: any) {
+    const fromHistory = !!(opts && opts.fromHistory);
+    if (isReplayPayload(payload)) return;
+    if (!fromHistory && isStaleLiveEvent(payload, this._historyWatermark)) return;
     const data = unwrap(payload);
     switch (name) {
       case 'user_message':              return this.onUserMessage(data, opts);
@@ -2365,6 +2850,9 @@ export class ChatView {
       case 'handshake':                 return this.onHandshake(data);
       case 'session_summary_generated': return this.onSessionSummary(data);
       case 'prompt_complete':           return this.onPromptComplete(data);
+      case 'prompt_result':             return this.onPromptResult(data);
+      case 'turn_completed':            return this.onTurnCompleted(data);
+      case 'x.ai/session/update':       return this.onXSessionUpdate(payload);
       case 'agent_status':              return this.onAgentStatus(data);
       case 'session_notification':      return this.onSessionNotification(data);
       case 'error':                     return this.onError(data);
@@ -2394,23 +2882,42 @@ export class ChatView {
   }
 
   onUserMessage(data: any, opts?: any) {
+    if (isNonTextUserContent(data)) return;
     const text = (data && typeof data.text === 'string') ? data.text : extractText(data);
     const attachments = Array.isArray(data && data.attachments) ? data.attachments : [];
     if (!text && !attachments.length) return;
+    const ts = this._lastEventTs || Date.now();
     // Dedup: the live send() path calls startTurn(text) BEFORE the server
     // echoes user_message back over SSE. If the active turn already has the
     // same userText and no assistant/tools yet, the bubble is already there.
     if (
       this.activeTurn &&
-      (this.activeTurn.userText === text ||
+      (userTextsMatch(this.activeTurn.userText, text) ||
         ((this.activeTurn.userAttachments || []).length && attachments.length)) &&
       !this.activeTurn.assistant &&
       (!this.activeTurn.tools || !this.activeTurn.tools.length)
     ) {
+      if (!this.activeTurn.user && shouldRenderUserBubble(text, attachments)) {
+        this._fillUserOnTurn(this.activeTurn, text, attachments, ts);
+      }
+      return;
+    }
+    // session/load and ring catch-up re-emit prior user turns after
+    // prompt_complete has already closed activeTurn. Skip those copies.
+    if (hasMatchingUserTurn(this.turns, text)) return;
+    // A thought/tool may have opened an empty shell via ensureTurn(). Fill
+    // that shell instead of stacking a second YOU.
+    if (
+      this.activeTurn &&
+      !this.activeTurn.user &&
+      !this.activeTurn.assistant &&
+      (!this.activeTurn.tools || !this.activeTurn.tools.length)
+    ) {
+      this._fillUserOnTurn(this.activeTurn, text, attachments, ts);
       return;
     }
     this.startTurn(text, {
-      ts: this._lastEventTs || Date.now(),
+      ts,
       fromHistory: !!(opts && opts.fromHistory),
       attachments,
     });
@@ -2514,7 +3021,7 @@ export class ChatView {
     turn.tools.push({ id: data.toolCallId, card });
     const live = !this._isReplaying && !(opts && opts.fromHistory);
     if (live) card.node.classList.add('tool-pill--enter');
-    this._ensureToolsGroup(turn).appendChild(card.node);
+    this._placeToolCard(turn, card.node);
     this._scrollToolsToBottom();
     // Add to the in-flight strip unless this came from history replay
     // (those calls are already terminal and would just flash). Skip
@@ -2543,7 +3050,7 @@ export class ChatView {
       turn.tools.push({ id: data.toolCallId, card });
       const live = !this._isReplaying && !(opts && opts.fromHistory);
       if (live) card.node.classList.add('tool-pill--enter');
-      this._ensureToolsGroup(turn).appendChild(card.node);
+      this._placeToolCard(turn, card.node);
       this._scrollToolsToBottom();
       if (live && !card.isTodo) this._addInFlight(data, card.node);
       if (this._pendingTodoSeed) {
@@ -2647,11 +3154,13 @@ export class ChatView {
   }
 
   onPromptComplete(data: any) {
-    const meta = (data && data._meta) || data || {};
+    const usage = extractTokenMeta(data);
+    const bag = (data && data._meta) || data || {};
+    const meta = mergeTokenMeta(usage, bag);
     if (meta && (meta.totalTokens != null || meta.total_tokens != null)) {
       this.latestTotalTokens = meta.totalTokens ?? meta.total_tokens;
       this._renderTokensPill();
-    this._renderInflightPill();
+      this._renderInflightPill();
     }
     // The turn is done; any tools that didn't get a terminal update were
     // implicitly completed (or aborted). Clear the strip so it doesn't
@@ -2660,11 +3169,13 @@ export class ChatView {
     // Capture sessionId/cwd from prompt_complete meta if the agent record is
     // missing it (handshake metadata is sometimes delivered out of band).
     if (this.currentAgent) {
-      if (meta.sessionId && !this.currentAgent.sessionId) {
-        this.currentAgent.sessionId = meta.sessionId;
+      const sessionId = bag.sessionId || (data && data.sessionId);
+      const modelId = (meta && (meta.modelId || meta.model_id || meta.model)) || bag.modelId;
+      if (sessionId && !this.currentAgent.sessionId) {
+        this.currentAgent.sessionId = sessionId;
       }
-      if (meta.modelId && !this.currentAgent.model) {
-        this.currentAgent.model = meta.modelId;
+      if (modelId && !this.currentAgent.model) {
+        this.currentAgent.model = modelId;
       }
       // refresh the info pane if visible
       if (this.tabsState === 'info') this.renderInfo(this.currentAgent);
@@ -2672,23 +3183,38 @@ export class ChatView {
     this.endTurn(meta);
   }
 
+  onPromptResult(data: any) {
+    this.endTurn(data);
+  }
+
+  onTurnCompleted(data: any) {
+    this._ingestTurnUsage(data);
+  }
+
+  onXSessionUpdate(payload: any) {
+    // unwrap() would drop params._meta / params.update.usage, so read the
+    // raw envelope. Only turn_completed carries the token ledger.
+    if (!isTurnCompletedPayload(payload) && !isTurnCompletedPayload(unwrap(payload))) return;
+    this._ingestTurnUsage(payload);
+  }
+
   onAgentStatus(data: any) {
-    if (this._heldByTui(this.currentAgent)) {
-      this._paintAgentStatus(this.currentAgent);
-      return;
-    }
     const status = data && (data.status || data.state);
     if (!status) return;
-    if (status === 'running') {
+    if (status === 'starting') {
+      this.showStatus('connecting...', 'idle');
+    } else if (status === 'running') {
       this.showStatus('agent is running', 'warn');
       this.composerCancel.disabled = false;
     } else if (status === 'idle') {
       this.showStatus('idle', 'ok');
+      if (!this.activeTurn) this.composerCancel.disabled = true;
+    } else if (status === 'disconnected' || status === 'exited' || status === 'killed') {
+      this.showStatus(status, status === 'disconnected' ? 'idle' : 'fail');
       this.composerCancel.disabled = true;
     } else if (status === 'errored') {
       this.showStatus('errored', 'fail');
-    } else if (status === 'killed') {
-      this.showStatus('killed', 'fail');
+      this.composerCancel.disabled = true;
     } else {
       this.showStatus(status, 'idle');
     }
@@ -2700,7 +3226,8 @@ export class ChatView {
   }
 
   onError(data: any) {
-    const text = (data && (data.message || data.error)) || (typeof data === 'string' ? data : JSON.stringify(data));
+    const text = errorBannerText(data);
+    if (!text) return;
     const turn = this.activeTurn || this.ensureTurn();
     turn.root.appendChild(renderErrorBanner(text));
     this.scrollToBottom();
@@ -2728,6 +3255,11 @@ export class ChatView {
       this.composerHint.textContent = '';
     }
     this.palette.classList.add('hidden');
+    this._suggestPinned = false;
+    this._stopDictation();
+    this._autosizeComposer();
+    this._syncComposerBar();
+    this._renderComposerSuggest();
 
     // Start a turn locally and let the SSE stream fill in the rest.
     // The user just sent a message; they want to see it land, so re-enable
@@ -2743,11 +3275,6 @@ export class ChatView {
       this._lastServerEcho = resp && typeof resp === 'object' ? resp : null;
       if (this.imageAttach) this.imageAttach.clear();
     } catch (e: any) {
-      if (e && e.status === 409) {
-        this.showToast(e.message || 'TUI is using this session.', 'warn');
-        if (this.currentAgent) this.currentAgent.heldBy = 'tui';
-        this._syncHeldBy(this.currentAgent);
-      }
       this.activeTurn && this.activeTurn.root.appendChild(renderErrorBanner(e.message));
       this.endTurn(null);
     }
@@ -2902,19 +3429,6 @@ export class ChatView {
     this._populateSettingsDrawer(this.currentAgent || {});
     this.settingsDrawer.classList.add('chat-settings-drawer--open');
     this.settingsDrawerOpen = true;
-    // Fetch model suggestions lazily on first open. Best-effort.
-    if (this._modelSuggestions == null) {
-      this._modelSuggestions = [];
-      api.systemModels.get()
-        .then((r: any) => {
-          const items = (r && Array.isArray(r.items)) ? r.items : [];
-          this._modelSuggestions = items.map((i: any) => i.id).filter(Boolean);
-          this._renderModelDatalist();
-        })
-        .catch(() => { /* leave list empty */ });
-    } else {
-      this._renderModelDatalist();
-    }
   }
 
   closeSettingsDrawer() {
@@ -2949,22 +3463,6 @@ export class ChatView {
       type: 'text',
       placeholder: 'optional agent name',
     });
-
-    const modelInput = el('input', {
-      class: 'sd-input',
-      type: 'text',
-      list: 'chat-settings-model-list',
-      placeholder: 'e.g. grok-code-fast-1',
-    });
-    const reasoningSelect = el('select', { class: 'sd-input' },
-      el('option', { value: '' }, 'default'),
-      el('option', { value: 'none' }, 'none'),
-      el('option', { value: 'minimal' }, 'minimal'),
-      el('option', { value: 'low' }, 'low'),
-      el('option', { value: 'medium' }, 'medium'),
-      el('option', { value: 'high' }, 'high'),
-      el('option', { value: 'xhigh' }, 'xhigh'),
-    );
 
     const systemPromptTa = el('textarea', {
       class: 'sd-input sd-textarea sd-textarea--lg',
@@ -3020,13 +3518,10 @@ export class ChatView {
 
     // Wire dirty tracking on every interactive control.
     for (const inp of [
-      nameInput, modelInput, reasoningSelect, systemPromptTa, rulesTa,
+      nameInput, systemPromptTa, rulesTa,
       toolsInput, disallowedInput, allowTa, denyTa, sandboxInput,
       worktreeInput, alwaysApproveCheckbox,
     ]) onDirty(inp);
-
-    const dataList = el('datalist', { id: 'chat-settings-model-list' });
-    this._modelDatalist = dataList;
 
     // ---- buttons --------------------------------------------------------
     const saveBtn = el('button', {
@@ -3061,20 +3556,11 @@ export class ChatView {
     const identitySection = section('Identity',
       field('name', 'Name', nameInput,
         'optional agent name (used in sidebar + tab title).'),
-    );
-
-    const modelSection = section('Model',
-      el('div', { class: 'sd-grid' },
-        field('model', 'Model', modelInput,
-          'overrides the global default. blank = use default.'),
-        field('reasoningEffort', 'Reasoning effort', reasoningSelect,
-          'none | minimal | low | medium | high | xhigh.'),
-      ),
       el('label', { class: 'sd-toggle' },
         alwaysApproveCheckbox,
         el('span', { class: 'sd-toggle-text' }, 'always approve tool calls'),
         el('span', { class: 'sd-toggle-hint' },
-          'auto-approve every tool call (default on).'),
+          'auto-approve every tool call (default on). Model and reasoning live on the composer chip.'),
       ),
     );
 
@@ -3114,12 +3600,10 @@ export class ChatView {
 
     const body = el('div', { class: 'sd-body' },
       identitySection,
-      modelSection,
       promptSection,
       toolsSection,
       permsSection,
       envSection,
-      dataList,
     );
 
     const head = el('header', { class: 'sd-head' },
@@ -3151,14 +3635,6 @@ export class ChatView {
     this.root.appendChild(drawer);
   }
 
-  _renderModelDatalist() {
-    if (!this._modelDatalist) return;
-    this._modelDatalist.replaceChildren();
-    for (const m of (this._modelSuggestions || [])) {
-      this._modelDatalist.appendChild(el('option', { value: m }));
-    }
-  }
-
   _populateSettingsDrawer(agent: any) {
     if (!this._sdFields) return;
     const s = (agent && agent.settings) || {};
@@ -3166,8 +3642,6 @@ export class ChatView {
     if (this._sdNameInput) {
       this._sdNameInput.value = typeof (agent && agent.name) === 'string' ? agent.name : '';
     }
-    f.model.value                = typeof s.model === 'string' ? s.model : '';
-    f.reasoningEffort.value      = typeof s.reasoningEffort === 'string' ? s.reasoningEffort : '';
     f.systemPromptOverride.value = typeof s.systemPromptOverride === 'string' ? s.systemPromptOverride : '';
     f.rules.value                = typeof s.rules === 'string' ? s.rules : '';
     f.tools.value                = typeof s.tools === 'string' ? s.tools : '';
@@ -3219,8 +3693,6 @@ export class ChatView {
       .map((l: any) => l.trim())
       .filter(Boolean);
     const out: any = {
-      model:                f.model.value.trim(),
-      reasoningEffort:      f.reasoningEffort.value.trim(),
       systemPromptOverride: f.systemPromptOverride.value,
       rules:                f.rules.value,
       tools:                f.tools.value.trim(),

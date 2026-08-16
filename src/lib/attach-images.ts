@@ -39,6 +39,8 @@ export interface AttachChangeEvent {
 
 export interface SetupImageAttachOptions {
   container: HTMLElement;
+  /** Where preview pills/notices mount. Defaults to `container`. */
+  pillsHost?: HTMLElement | null;
   textarea?: HTMLTextAreaElement | null;
   fileInput?: HTMLInputElement | null;
   canAttachImages?: () => boolean;
@@ -61,7 +63,7 @@ interface ShowErrorFn {
 export function setupImageAttach(
   options: SetupImageAttachOptions,
 ): AttachController {
-  const { container, textarea, fileInput, canAttachImages, onChange } = options;
+  const { container, pillsHost, textarea, fileInput, canAttachImages, onChange } = options;
   if (!container) throw new Error('setupImageAttach: container required');
 
   // Attachments are always supported now; the server saves them to
@@ -69,13 +71,14 @@ export function setupImageAttach(
   const supported = (): boolean => true;
   void canAttachImages;
 
+  const mount = pillsHost || container;
   const pills = document.createElement('div');
   pills.className = 'attach-pills hidden';
-  container.appendChild(pills);
+  mount.appendChild(pills);
 
   const notice = document.createElement('div');
   notice.className = 'attach-notice hidden';
-  container.appendChild(notice);
+  mount.appendChild(notice);
 
   let attachments: Attachment[] = [];
   let nextId = 1;

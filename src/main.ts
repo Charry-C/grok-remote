@@ -11,6 +11,16 @@ import { applyTheme, getTheme, nextTheme, getThemeMeta } from './lib/themes.js';
 import { installVersionFooter } from './lib/version-footer.js';
 import { SYSTEM_PAGES, getSystemPage } from './views/system/index.js';
 import { iconHtml } from './lib/icons.js';
+import { loadLastAgent } from './lib/last-agent.js';
+import { copyToClipboard } from './lib/copy.js';
+import {
+  PRODUCT_NAME,
+  type TopbarContext,
+  contextFromAgent,
+  documentTitleFor,
+  formatCwd,
+  pageTitle,
+} from './lib/topbar.js';
 
 interface Agent {
   id: string;
@@ -57,13 +67,80 @@ window.addEventListener('grok-remote:theme-change', () => {
 });
 
 function setStatus(kind: string, text: string): void {
+  const status = document.getElementById('status');
   const pill = document.getElementById('status-pill');
   const txt  = document.getElementById('status-text');
-  if (!pill || !txt) return;
-  pill.className = 'status-pill';
-  pill.classList.add(`status-pill--${kind}`);
-  pill.textContent = kind === 'ok' ? '●' : (kind === 'fail' ? '×' : (kind === 'warn' ? '!' : '·'));
-  txt.textContent = text;
+  if (!status || !pill || !txt) return;
+  status.className = `status status--${kind}`;
+  status.title = text;
+  pill.className = `status-dot status-dot--${kind}`;
+  pill.textContent = '';
+  txt.textContent = kind === 'ok' ? 'tailnet' : text;
+}
+
+let lastTopbarCtx: TopbarContext = { kind: 'home', title: PRODUCT_NAME };
+let anyAgentBusy = false;
+
+function paintDocumentTitle(): void {
+  const want = documentTitleFor(lastTopbarCtx, anyAgentBusy);
+  if (document.title !== want) document.title = want;
+}
+
+function applyTopbar(ctx: TopbarContext): void {
+  lastTopbarCtx = ctx;
+  const root = document.querySelector('.topbar');
+  const titleEl = document.getElementById('topbar-title') as HTMLButtonElement | null;
+  const titleRow = document.getElementById('topbar-title-row');
+  const metaEl = document.getElementById('topbar-meta') as HTMLElement | null;
+  const liveEl = document.getElementById('topbar-live') as HTMLElement | null;
+  const liveLabel = document.getElementById('topbar-live-label');
+  const modelEl = document.getElementById('topbar-model') as HTMLElement | null;
+  const cwdBtn = document.getElementById('topbar-cwd') as HTMLButtonElement | null;
+  const cwdPath = document.getElementById('topbar-cwd-path');
+
+  if (root) root.setAttribute('data-kind', ctx.kind);
+
+  if (titleEl) {
+    titleEl.textContent = ctx.title;
+    const isChat = ctx.kind === 'chat';
+    titleEl.disabled = !isChat;
+    if (titleRow) titleRow.classList.toggle('is-action', isChat);
+    if (isChat) {
+      titleEl.title = 'Open agent settings';
+      titleEl.setAttribute('aria-label', `Agent settings for ${ctx.title}`);
+    } else {
+      titleEl.removeAttribute('title');
+      titleEl.setAttribute('aria-label', ctx.title);
+    }
+  }
+
+  const showLive = !!(ctx.kind === 'chat' && ctx.live);
+  if (liveEl && liveLabel) {
+    liveEl.hidden = !showLive;
+    if (ctx.live) {
+      liveEl.className = `topbar-live topbar-live--${ctx.live.kind}`;
+      liveLabel.textContent = ctx.live.label;
+    }
+  }
+
+  const model = ctx.kind === 'chat' ? (ctx.model || '') : '';
+  if (modelEl) {
+    modelEl.hidden = !model;
+    modelEl.textContent = model;
+    modelEl.title = model;
+  }
+
+  const cwd = ctx.kind === 'chat' ? (ctx.cwd || '') : '';
+  if (cwdBtn && cwdPath) {
+    cwdBtn.hidden = !cwd;
+    cwdBtn.dataset.cwd = cwd;
+    cwdPath.textContent = formatCwd(cwd);
+    cwdBtn.title = cwd ? `Copy path: ${cwd}` : '';
+    cwdBtn.setAttribute('aria-label', cwd ? `Copy working directory ${cwd}` : 'working directory');
+  }
+
+  if (metaEl) metaEl.hidden = !(showLive || !!model || !!cwd);
+  paintDocumentTitle();
 }
 
 async function pingHello(): Promise<void> {
@@ -181,6 +258,15 @@ function mountDashboard(): void {
   const host = document.getElementById('app');
   if (!host) return;
   host.replaceChildren();
+  // replaceChildren wipes the static #drawer-backdrop from index.html.
+  // Recreate it here so tap-outside can close the mobile drawer. Stays
+  // inside .app so it shares the stacking context with the sidebar.
+  const backdrop = el('div', {
+    class: 'drawer-backdrop',
+    id: 'drawer-backdrop',
+    hidden: true,
+  });
+  host.appendChild(backdrop);
 
   let currentAgent: Agent | null = null;
   let activeSystemPage: SystemPageRef | null = null;
@@ -220,7 +306,7 @@ function mountDashboard(): void {
 
   const settingsBtn = document.getElementById('open-settings');
   if (settingsBtn) {
-    settingsBtn.innerHTML = iconHtml('settings');
+    settingsBtn.innerHTML = iconHtml('gear');
     settingsBtn.addEventListener('click', (ev) => {
       ev.preventDefault();
       navigate('#/settings');
@@ -236,17 +322,41 @@ function mountDashboard(): void {
     });
   }
 
-  const brandActive = document.getElementById('brand-active') as HTMLElement | null;
-  const baseTitle = document.title;
+  const titleEl = document.getElementById('topbar-title') as HTMLButtonElement | null;
+  const titleRow = document.getElementById('topbar-title-row');
+  const openAgentSettings = () => {
+    if (titleEl && titleEl.disabled) return;
+    document.dispatchEvent(new CustomEvent('grok-remote:open-agent-settings'));
+  };
+  if (titleEl) titleEl.addEventListener('click', openAgentSettings);
+  if (titleRow) titleRow.addEventListener('click', openAgentSettings);
+  const cwdBtn = document.getElementById('topbar-cwd') as HTMLButtonElement | null;
+  const cwdPath = document.getElementById('topbar-cwd-path');
+  if (cwdBtn && cwdPath) {
+    cwdBtn.addEventListener('click', async () => {
+      const cwd = cwdBtn.dataset.cwd || '';
+      if (!cwd) return;
+      const ok = await copyToClipboard(cwd);
+      if (!ok) return;
+      const orig = cwdPath.textContent;
+      cwdPath.textContent = 'copied';
+      window.setTimeout(() => {
+        if (cwdPath.textContent === 'copied') cwdPath.textContent = orig || formatCwd(cwd);
+      }, 1100);
+    });
+  }
+
+  document.addEventListener('grok-remote:topbar-context', (ev: Event) => {
+    const detail = (ev as CustomEvent<TopbarContext>).detail;
+    if (detail && detail.kind) applyTopbar(detail);
+  });
   document.addEventListener('grok-remote:agents-refresh', (ev: Event) => {
     const list = ((ev as CustomEvent).detail || []) as Agent[];
-    const active = list.some((a) =>
+    anyAgentBusy = list.some((a) =>
       (typeof a?.inFlight === 'number' && a.inFlight > 0) ||
       (a?.status === 'running')
     );
-    if (brandActive) brandActive.hidden = !active;
-    const wantTitle = active ? `(*) ${baseTitle}` : baseTitle;
-    if (document.title !== wantTitle) document.title = wantTitle;
+    paintDocumentTitle();
   });
 
   installBgTracker();
@@ -289,6 +399,7 @@ function mountDashboard(): void {
     updateRailHighlight(route);
     if (route.name === 'system') {
       const page = getSystemPage(route.area) as SystemPageRef | null;
+      applyTopbar({ kind: 'system', title: pageTitle(route.area) });
       if (page && page.module && typeof page.module.mount === 'function') {
         page.module.mount(mainHost, route);
         activeSystemPage = page;
@@ -296,6 +407,7 @@ function mountDashboard(): void {
       }
     }
     if (route.name === 'settings') {
+      applyTopbar({ kind: 'settings', title: 'Settings' });
       settings.mount(mainHost);
       settings.setActive(route.sub);
       activeSettings = true;
@@ -311,28 +423,38 @@ function mountDashboard(): void {
         currentAgent = found;
         sidebar.selectedId = found.id;
         sidebar.renderList();
+        applyTopbar(contextFromAgent(found));
         chat.setAgent(found);
       } else {
+        applyTopbar(contextFromAgent({ id: route.agentId }));
         api.getAgent(route.agentId).then((a: unknown) => {
-          const rec = (a && typeof a === 'object' && (a as Agent).id)
-            ? a as Agent
-            : { id: route.agentId };
-          currentAgent = rec;
-          sidebar.selectedId = rec.id;
+          currentAgent = (a as Agent | null) || { id: route.agentId };
+          sidebar.selectedId = currentAgent.id;
           sidebar.renderList();
-          chat.setAgent(rec);
+          applyTopbar(contextFromAgent(currentAgent));
+          chat.setAgent(currentAgent);
         }).catch(() => {
           currentAgent = { id: route.agentId };
+          applyTopbar(contextFromAgent(currentAgent));
           chat.setAgent(currentAgent);
         });
       }
       return;
     }
+    applyTopbar({ kind: 'home', title: PRODUCT_NAME });
     chat.mount(mainHost);
     chat.setAgent(null);
   }
 
   window.addEventListener('hashchange', renderRoute);
+  const first = parseRoute();
+  if (first.name === 'home') {
+    const last = loadLastAgent();
+    if (last) {
+      location.hash = `#/agents/${encodeURIComponent(last)}`;
+      return;
+    }
+  }
   renderRoute();
 }
 
@@ -357,6 +479,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (ham) {
     ham.addEventListener('click', (ev) => {
       ev.preventDefault();
+      ev.stopPropagation();
       toggleDrawer();
     });
   }
@@ -370,6 +493,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
   document.addEventListener('grok-remote:close-drawer', () => closeDrawer());
+  document.addEventListener('grok-remote:open-drawer', () => openDrawer());
+  // Fallback: any tap outside the drawer (and not on the hamburger)
+  // closes it. Covers the case where the backdrop is missing or a
+  // later sibling ate the click.
+  document.addEventListener('click', (ev) => {
+    if (!document.body.hasAttribute('data-drawer-open')) return;
+    const target = ev.target as Element | null;
+    if (!target || !target.closest) return;
+    if (target.closest('.sidebar')) return;
+    if (target.closest('#hamburger-btn')) return;
+    if (target.closest('#drawer-backdrop')) return;
+    closeDrawer();
+  });
 
   registerPwa();
 

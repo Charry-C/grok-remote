@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { unwrap, extractText } from '../src/lib/acp-payload.js';
+import { unwrap, extractText, errorBannerText } from '../src/lib/acp-payload.js';
 
 test('unwrap returns the inner .update object when present', () => {
   const inner = { sessionUpdate: 'tool_call', toolCallId: 't1' };
@@ -58,7 +58,25 @@ test('extractText returns null for non-string non-object input', () => {
   assert.equal(extractText(true), null);
 });
 
+test('errorBannerText ignores empty EventSource / {} payloads', () => {
+  assert.equal(errorBannerText(null), null);
+  assert.equal(errorBannerText(undefined), null);
+  assert.equal(errorBannerText({}), null);
+  assert.equal(errorBannerText(''), null);
+  assert.equal(errorBannerText('{}'), null);
+  assert.equal(errorBannerText({ message: '' }), null);
+  assert.equal(errorBannerText({ error: '   ' }), null);
+});
+
+test('errorBannerText reads message or error strings', () => {
+  assert.equal(errorBannerText({ message: 'agent died' }), 'agent died');
+  assert.equal(errorBannerText({ error: 'rpc failed' }), 'rpc failed');
+  assert.equal(errorBannerText('plain failure'), 'plain failure');
+});
+
 test('extractText returns null when no text field is present anywhere', () => {
   assert.equal(extractText({ kind: 'tool_call', toolCallId: 't1' }), null);
   assert.equal(extractText({ content: { kind: 'image' } }), null);
+  assert.equal(extractText({ content: { type: 'image', data: '/9j/' } }), null);
+  assert.equal(extractText({ content: { type: 'resource_link', uri: 'file://x' } }), null);
 });

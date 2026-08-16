@@ -52,3 +52,24 @@ export function extractText(payload: unknown): string | null {
   if (typeof p.text === 'string') return p.text;
   return null;
 }
+
+/**
+ * Text for an error banner, or null when the payload is empty noise
+ * (native EventSource reconnects, `{}`, missing message).
+ */
+export function errorBannerText(data: unknown): string | null {
+  if (data == null) return null;
+  if (typeof data === 'string') {
+    const trimmed = data.trim();
+    if (!trimmed || trimmed === '{}' || trimmed === '[]') return null;
+    return trimmed;
+  }
+  if (typeof data !== 'object' || Array.isArray(data)) return null;
+  const rec = data as UnknownRecord;
+  const inner = rec.message ?? rec.error;
+  if (typeof inner === 'string') {
+    const trimmed = inner.trim();
+    return trimmed || null;
+  }
+  return null;
+}

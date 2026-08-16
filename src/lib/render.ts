@@ -1,6 +1,9 @@
 // Pure-ish DOM helpers + markdown-light renderers.
 // No external libraries. All functions return DOM nodes or strings.
 
+import type { TokenMeta } from './token-usage';
+export type { TokenMeta };
+
 type ElChild = Node | string | number | boolean | null | undefined | ElChild[];
 type ElAttrs = Record<string, unknown> | null;
 
@@ -40,37 +43,168 @@ export function escapeHtml(s: unknown): string {
   }[c] as string));
 }
 
+type MdPart =
+  | { type: 'code'; lang: string; code: string }
+  | { type: 'text'; text: string };
+
 export function renderMarkdownLight(text: string): HTMLElement {
-  if (!text) return el('span');
   const container = el('div', { class: 'md' });
-  const segments = String(text).split(/(```[\s\S]*?```)/g);
-  for (const seg of segments) {
-    if (!seg) continue;
-    if (seg.startsWith('```') && seg.endsWith('```') && seg.length >= 6) {
-      const inner = seg.slice(3, -3);
-      const nl = inner.indexOf('\n');
-      let lang = '', code = inner;
-      if (nl >= 0 && /^[a-zA-Z0-9_-]*$/.test(inner.slice(0, nl))) {
-        lang = inner.slice(0, nl);
-        code = inner.slice(nl + 1);
-      }
-      const pre = el('pre', { class: 'md-code' },
-        el('code', { class: lang ? `lang-${lang}` : '' }, code)
-      );
-      container.appendChild(pre);
-    } else {
-      const block = el('div', { class: 'md-block' });
-      block.innerHTML = inlineMd(seg);
-      container.appendChild(block);
-    }
+  if (!text) return container;
+  for (const part of splitFences(String(text))) {
+    if (part.type === 'code') container.appendChild(renderFence(part.lang, part.code));
+    else renderBlocks(container, part.text);
   }
   return container;
 }
 
+function splitFences(src: string): MdPart[] {
+  const out: MdPart[] = [];
+  const re = /```([a-zA-Z0-9_+-]*)[ \t]*\r?\n?([\s\S]*?)```/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    if (m.index > last) out.push({ type: 'text', text: src.slice(last, m.index) });
+    out.push({ type: 'code', lang: m[1] || '', code: trimFenceCode(m[2] || '') });
+    last = m.index + m[0].length;
+  }
+  const rest = src.slice(last);
+  const open = rest.match(/^```([a-zA-Z0-9_+-]*)[ \t]*\r?\n?([\s\S]*)$/);
+  if (open) out.push({ type: 'code', lang: open[1] || '', code: open[2] || '' });
+  else if (rest) out.push({ type: 'text', text: rest });
+  return out;
+}
+
+function trimFenceCode(code: string): string {
+  return code.replace(/\n$/, '');
+}
+
+function renderFence(lang: string, code: string): HTMLElement {
+  const pre = el('pre', { class: 'md-code' },
+    el('code', { class: lang ? `lang-${lang}` : '' }, code),
+  );
+  if (lang) pre.dataset.lang = lang;
+  return pre;
+}
+
+function isBlockStart(line: string): boolean {
+  return /^(#{1,6}\s|```|[-*+]\s|\d+\.\s|>\s?|(-{3,}|\*{3,}|_{3,})$|\|)/.test(line.trimStart())
+    || /^\|.+\|$/.test(line.trim());
+}
+
+function renderBlocks(root: HTMLElement, text: string): void {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] || '';
+    if (!line.trim()) { i++; continue; }
+
+    const hm = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (hm && hm[1] && hm[2]) {
+      const level = hm[1].length;
+      root.appendChild(el(`h${level}`, { class: `md-h md-h${level}`, html: inlineMd(hm[2]) }));
+      i++;
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+      root.appendChild(el('hr', { class: 'md-hr' }));
+      i++;
+      continue;
+    }
+
+    if (/^>\s?/.test(line)) {
+      const buf: string[] = [];
+      while (i < lines.length && /^>\s?/.test(lines[i] || '')) {
+        buf.push((lines[i] || '').replace(/^>\s?/, ''));
+        i++;
+      }
+      const quote = el('blockquote', { class: 'md-quote' });
+      renderBlocks(quote, buf.join('\n'));
+      root.appendChild(quote);
+      continue;
+    }
+
+    if (/^\s*[-*+]\s+/.test(line)) {
+      const ul = el('ul', { class: 'md-list' });
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i] || '')) {
+        ul.appendChild(el('li', { html: inlineMd((lines[i] || '').replace(/^\s*[-*+]\s+/, '')) }));
+        i++;
+      }
+      root.appendChild(ul);
+      continue;
+    }
+
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const ol = el('ol', { class: 'md-list md-list--ol' });
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i] || '')) {
+        ol.appendChild(el('li', { html: inlineMd((lines[i] || '').replace(/^\s*\d+\.\s+/, '')) }));
+        i++;
+      }
+      root.appendChild(ol);
+      continue;
+    }
+
+    if (isTableHeader(lines, i)) {
+      const parsed = parseTable(lines, i);
+      root.appendChild(parsed.node);
+      i = parsed.next;
+      continue;
+    }
+
+    const buf: string[] = [];
+    while (i < lines.length) {
+      const cur = lines[i] || '';
+      if (!cur.trim()) break;
+      if (buf.length && isBlockStart(cur)) break;
+      buf.push(cur);
+      i++;
+    }
+    root.appendChild(el('p', { class: 'md-p', html: inlineMd(buf.join('\n')) }));
+  }
+}
+
+function isTableHeader(lines: string[], i: number): boolean {
+  const a = (lines[i] || '').trim();
+  const b = (lines[i + 1] || '').trim();
+  return a.startsWith('|') && a.endsWith('|') && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(b);
+}
+
+function splitRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').map((c) => c.trim());
+}
+
+function parseTable(lines: string[], i: number): { node: HTMLElement; next: number } {
+  const headers = splitRow(lines[i] || '');
+  i += 2;
+  const rows: string[][] = [];
+  while (i < lines.length && (lines[i] || '').trim().startsWith('|')) {
+    rows.push(splitRow(lines[i] || ''));
+    i++;
+  }
+  const thead = el('thead', {},
+    el('tr', {}, headers.map((h) => el('th', { html: inlineMd(h) }))),
+  );
+  const tbody = el('tbody', {}, rows.map((r) =>
+    el('tr', {}, headers.map((_, idx) => el('td', { html: inlineMd(r[idx] || '') }))),
+  ));
+  return { node: el('table', { class: 'md-table' }, thead, tbody), next: i };
+}
+
 function inlineMd(s: string): string {
   let out = escapeHtml(s);
+  out = out.replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g,
+    (_m, alt, href) => `<img class="md-img" alt="${alt}" src="${href}" loading="lazy" />`);
+  out = out.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+    (_m, label, href) => `<a class="md-a" href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`);
   out = out.replace(/`([^`\n]+)`/g, (_m, g1) => `<code class="md-inline-code">${g1}</code>`);
+  out = out.replace(/\*\*\*([^*\n]+)\*\*\*/g, (_m, g1) => `<strong><em>${g1}</em></strong>`);
   out = out.replace(/\*\*([^*\n]+)\*\*/g, (_m, g1) => `<strong>${g1}</strong>`);
+  out = out.replace(/__([^_\n]+)__/g, (_m, g1) => `<strong>${g1}</strong>`);
+  out = out.replace(/(^|[^\*])\*([^*\n]+)\*/g, (_m, pre, g1) => `${pre}<em>${g1}</em>`);
+  out = out.replace(/~~([^~\n]+)~~/g, (_m, g1) => `<del>${g1}</del>`);
   out = out.replace(/\n/g, '<br/>');
   return out;
 }
@@ -192,15 +326,16 @@ export interface UserBubbleOpts {
   agentId?: string;
 }
 
-export function renderUserBubble(text: string, ts?: number | string | Date, opts: UserBubbleOpts = {}): HTMLElement {
+export function renderUserBubble(text: string, ts?: number | string | Date, opts: UserBubbleOpts = {}): HTMLElement | null {
   const when = ts ? new Date(ts) : new Date();
   const attachments = Array.isArray(opts.attachments) ? opts.attachments : [];
   const visibleText = stripGeneratedAttachmentBlock(text, attachments);
+  const attachmentGrid = renderUserAttachments(attachments, opts.agentId);
+  if (!visibleText && !attachmentGrid) return null;
+
   const body = el('div', { class: 'msg-body' });
   if (visibleText) body.appendChild(renderMarkdownLight(visibleText));
-  const attachmentGrid = renderUserAttachments(attachments, opts.agentId);
   if (attachmentGrid) body.appendChild(attachmentGrid);
-  if (!visibleText && !attachmentGrid) body.appendChild(renderMarkdownLight(''));
 
   return el('div', { class: 'msg msg--user' },
     el('div', { class: 'msg-head' },
@@ -582,16 +717,6 @@ export function renderTodoWriteCard(initial: ToolPayload): ToolCard {
     ingestExternal: (payload: ToolPayload): void => { ingest(payload); applyStatus(payload); render(); },
     isTodo: true,
   };
-}
-
-export interface TokenMeta {
-  inputTokens?: number; input_tokens?: number;
-  outputTokens?: number; output_tokens?: number;
-  cachedReadTokens?: number; cached_read_tokens?: number; cachedTokens?: number;
-  reasoningTokens?: number; reasoning_tokens?: number;
-  totalTokens?: number | null; total_tokens?: number | null;
-  modelId?: string | null; model_id?: string | null; model?: string | null;
-  stopReason?: string | null; stop_reason?: string | null;
 }
 
 export function renderTokenFooter(meta: TokenMeta | null | undefined): HTMLElement {
