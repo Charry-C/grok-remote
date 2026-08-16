@@ -1,0 +1,24 @@
+node_modules/
+dist/
+logs/
+.DS_Store
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tsbuildinfo
+.cache/
+.tmp/
+.claude/
+
+# personal drafts (tweets, scratch notes)
+tweet.md
+scratch.md
+
+# protocol probe captures: contain hostname + home paths. probe.js stays.
+experiments/*.log
+experiments/exp*-out.txt
+experiments/exp*-prompt.txt
+LOOP_LOG.md

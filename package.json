@@ -1,0 +1,47 @@
+{
+  "name": "grok-remote",
+  "version": "0.2.0",
+  "description": "Run your grok agent over your tailnet. Hello-world starting point for the remote-agent build.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "install:setup": "node --import tsx installer.ts",
+    "start": "node --import tsx server.ts",
+    "dev": "vite",
+    "dev:server": "tsx watch server.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:integration": "RUN_LOCAL_INTEGRATION=1 node --import tsx --test test/integration/*.test.ts",
+    "build": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop grok-remote",
+    "pm2:restart": "pm2 restart grok-remote",
+    "pm2:logs": "pm2 logs grok-remote"
+  },
+  "devDependencies": {
+    "@types/dagre": "^0.7.52",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "^5.4.10"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "Daniel Farina <https://x.com/daniel_farinax>",
+  "bin": {
+    "grok-remote": "./bin/gr"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.10.2",
+    "dagre": "^0.8.5",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "split.js": "^1.6.5"
+  }
+}
