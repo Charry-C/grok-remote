@@ -16,7 +16,7 @@
 
 对话真相只存在 `~/.grok/sessions`。侧栏每一行只是一个 overlay UUID，指向某个 grok `sessionId`。overlay 目录里真正需要的只有 `meta.json`（星标、归档、改名、文件夹、`wantedConnected`、每聊设置）。没有隔离沙箱 `cwd/`，overlay `history.jsonl` 也不是持久记录。
 
-当前前端是 **phone-first PWA**：会话列表、连接状态、历史回放、文件夹、斜杠命令、模型切换。桌面时代的 Settings / Files / Flow / Trace / MCP / LSP 等独立页面已经拆掉。
+当前前端是 **phone-first PWA**：会话列表抽屉、聊天、文件夹、斜杠命令、模型 sheet、图片附件。没有独立的 Settings / Files / Flow / Trace / MCP 管理页。
 
 > 与 xAI、grok、Tailscale 均无官方关系。
 >
@@ -38,7 +38,7 @@
 
 ## 它做什么
 
-- **远程 UI 覆盖官方 TUI 会话。** 本机 `grok` 聊过的对话会出现在侧栏。点 `+ New` 会在 Settings 的 `defaultCwd`（真实项目目录）里开一个新的官方 session。第一轮回复会自动起名。
+- **远程 UI 覆盖官方 TUI 会话。** 本机 `grok` 聊过的对话会出现在侧栏。点 `+ New` 会在 `defaultCwd`（cwd sheet 里设的真实项目目录）开一个新的官方 session。第一轮回复会自动起名。
 - **写锁 + 409。** TUI pager 占用 → 状态 `observed`（“watching TUI” / “TUI · 只读”），输入框只读。remote 握着 ACP（`grok agent --no-leader`）→ 可以打字。空闲且 `wantedConnected: true` → 服务端自己连上。
 - **完整 ACP host。** 实现客户端侧的 `terminal/*`、`fs/*`、`session/request_permission`，让 agent 能在 recorded cwd 里跑命令、读文件、写文件。
 - **实时流。** SSE 转发每一个 `session/update`：思考、工具卡片（Pending → Running → Completed / Failed）、终端输出、助手正文、token 用量。TUI 握锁时，`UpdatesFileTail`（约 800ms）把 `updates.jsonl` 新行转成同一套 SSE。
@@ -149,7 +149,7 @@ grok agent --no-leader [--always-approve] stdio
 - JSON-RPC 2.0，一行一个对象，UTF-8。
 - `--no-leader`：每个 ACP 进程独立，互不抢 TUI leader，才能并行多聊。
 - `--always-approve`：agent 不卡在权限提示；我们仍实现 permission 回调。
-- cwd 是 recorded session cwd 或 Settings `defaultCwd`，必须是已存在的真实路径。
+- cwd 是 recorded session cwd 或 `defaultCwd`（cwd sheet / `PATCH /api/settings`），必须是已存在的真实路径。
 
 握手 `initialize` 之后：
 
@@ -215,7 +215,7 @@ POST /api/agents   { resumeSessionId, connect: false }   # 只建指针，不抢
 
 ### 6. 前端怎么拼起来
 
-纯 Vanilla TypeScript + Vite，**没有 React**（Flow 页和 `@xyflow/react` 已移除）。
+纯 Vanilla TypeScript + Vite，没有 React。
 
 | 文件 | 职责 |
 |------|------|
@@ -425,9 +425,7 @@ pm2 startup           # 按它打印的命令做
 
 ## HTTP API
 
-全部 JSON，除非另注。权威细节在 [PROTOCOL.md](./PROTOCOL.md)。
-
-没有 `GET /api/models`，也没有 `GET /api/tui/sessions`。手机 UI 不再调用 MCP / LSP / memory / leaders / worktrees 管理接口；服务端 `handleSystem` 现在只挂 models + skills。
+全部 JSON，除非另注。权威细节在 [PROTOCOL.md](./PROTOCOL.md)。下面是手机 UI 实际会打的面；没有 MCP / LSP / memory / leaders / worktrees / version / files 浏览 / trace / terminals 管理接口。`handleSystem` 只挂 models + skills list。
 
 | Method | Path | 作用 |
 |--------|------|------|
@@ -508,10 +506,12 @@ grok-remote/
 │   ├── folders.ts
 │   ├── history.ts              # overlay 兜底 jsonl
 │   ├── retention.ts
-│   ├── terminal-host.ts
+│   ├── bg-tasks.ts             # agent-manager 跟踪 in-flight 工具
+│   ├── terminal-host.ts        # ACP spawn，不是 HTTP /terminals
 │   ├── fs-host.ts
 │   ├── permission-host.ts
-│   └── routes/system/          # models + skills
+│   ├── grok-cli.ts             # `grok models`
+│   └── routes/system/          # GET models + GET skills list
 ├── src/
 │   ├── main.ts
 │   ├── style.css
@@ -525,18 +525,16 @@ grok-remote/
 
 ---
 
-## 和桌面版差在哪
+## 和上游桌面版差在哪
 
-相对上游 / 早期带 Settings 的版本，这个手机改版：
+相对 [daniel-farina/grok-remote](https://github.com/daniel-farina/grok-remote)：
 
-- 删掉 Settings、Files、Flow（React + xyflow）、Trace、Changelog、独立 system 页
-- 删掉 MCP / LSP / memory / leaders / worktrees / health / import 页面和对应后端路由模块
-- 主题只留 Dark / Light
-- 交互收成抽屉 + bottom sheet（cwd / import / model / filter / confirm）
-- composer 对齐 Grok 应用：附件、模型芯片、suggestion chips、手机 Enter 换行
-- Vite 不再挂 `@vitejs/plugin-react`
+- 只有会话列表 + 聊天。没有 Settings / Files / Flow / Trace / Changelog / MCP / LSP / memory / leaders / worktrees 独立页，也没有对应 HTTP。
+- 主题只留 Dark / Light；`defaultCwd` 用 cwd sheet，模型用 composer sheet。
+- 交互是抽屉 + bottom sheet，composer 对齐手机 Grok：附件、模型芯片、suggestion chips、手机 Enter 换行。
+- 纯 Vite + Vanilla TS，没有 React / `@xyflow`。
 
-会话模型没变：仍然是 TUI-first overlay + ACP 写路径 + `updates.jsonl` 只读尾巴。
+会话模型没变：TUI-first overlay + ACP 写路径 + `updates.jsonl` 只读尾巴。图片附件走 `GET /api/agents/:id/files/raw`。
 
 ---
 
