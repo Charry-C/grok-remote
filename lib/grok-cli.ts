@@ -1,4 +1,4 @@
-// Thin wrapper around the `grok` CLI for the system-pages routes.
+// Thin wrapper around the `grok` CLI (models list, plus any other grok text commands).
 
 import { spawn } from 'node:child_process';
 

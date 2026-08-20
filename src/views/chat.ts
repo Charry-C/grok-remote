@@ -270,9 +270,6 @@ export class ChatView {
     this._inFlightMap = new Map(); // toolCallId -> { kind, label, startedAt, chip }
     this._inFlightTimer = null;
 
-    // Background terminals strip: lists long-running shells launched by the
-    // agent ([bg] tool calls). Click a chip to view live output. Polls the
-    // /api/agents/:id/terminals endpoint every 2s while an agent is selected.
     this.root = el('section', { class: 'chat' },
       this.chromeEl,
       el('div', { class: 'chat-body' },
@@ -1312,7 +1309,7 @@ export class ChatView {
 
   startTurn(userText: any, opts?: any) {
     // A turn is about to land in the stream. Cancel the welcome animation
-    // if it's still running so the figlet doesn't overlap the new bubble.
+    // if it's still running so it doesn't overlap the new bubble.
     this._cancelChatIntro();
     const ts = (opts && opts.ts) || Date.now();
     const attachments = Array.isArray(opts && opts.attachments) ? opts.attachments : [];
@@ -1701,7 +1698,7 @@ export class ChatView {
     this.inFlightStripEl.hidden = this._inFlightMap.size === 0;
   }
 
-  // ── background terminals strip ───────────────────────────────────────
+  // ── in-flight chip duration ticker ───────────────────────────────────
 
   _startInFlightTicker() {
     if (this._inFlightTimer) return;
