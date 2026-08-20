@@ -370,9 +370,6 @@ Persist to `~/.grok-remote/settings.json`.
 | GET | `/api/hello` | Health-y endpoint + tailscale identity |
 | GET | `/api/health` | Liveness |
 | GET | `/api/agents/:id/files/raw` | `Range` stream |
-| GET | `/api/agents/:id/trace` | Session files / subagent index |
-| GET | `/api/subagents/:sessionId/trace` | Subagent by official sessionId |
-| GET | `/api/subagents/:sessionId/updates` | Raw TUI updates for a subagent |
 
 ---
 

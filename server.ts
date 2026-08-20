@@ -25,7 +25,6 @@ import { inferDevServerUrl } from './lib/dev-url.js';
 import { resolveConversationHistory } from './lib/conversation-history.js';
 import { resolveStartCwd } from './lib/history.js';
 import { writeHeaders as sseHeaders, writeEvent as sseWrite, writePing as ssePing } from './lib/sse.js';
-import { buildTrace, buildTraceForSessionId } from './lib/trace-host.js';
 import { handleSystem } from './lib/routes/system.js';
 import { listJoinedSystemSessions } from './lib/session-list.js';
 import { runGrokText, errorToResponse } from './lib/grok-cli.js';
@@ -257,99 +256,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
     return;
   }
 
-  {
-    const sm = url.match(/^\/api\/subagents\/([^\/]+)\/trace$/);
-    if (sm && method === 'GET') {
-      const sid = sm[1] || '';
-      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!UUID_RE.test(sid)) {
-        sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
-        return;
-      }
-      try {
-        const data = await buildTraceForSessionId(sid);
-        res.writeHead(200, {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'no-store',
-        });
-        res.end(JSON.stringify(data));
-        return;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        sendJson(res, 400, { ok: false, error: msg });
-        return;
-      }
-    }
-  }
-
-  {
-    const sm = url.match(/^\/api\/subagents\/([^\/]+)\/updates(?:\?.*)?$/);
-    if (sm && method === 'GET') {
-      const sid = sm[1] || '';
-      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!UUID_RE.test(sid)) {
-        sendJson(res, 400, { ok: false, error: 'invalid sessionId' });
-        return;
-      }
-      const qs   = new URL(req.url || '/', 'http://x').searchParams;
-      const cwd  = qs.get('cwd') || '';
-      const root = path.join(os.homedir(), '.grok', 'sessions');
-
-      function tryReadUpdates(sessionDir: string): unknown[] | null {
-        const p = path.join(sessionDir, 'updates.jsonl');
-        if (!fs.existsSync(p)) return null;
-        let raw: string;
-        try { raw = fs.readFileSync(p, 'utf8'); }
-        catch { return null; }
-        const out: unknown[] = [];
-        for (const line of raw.split('\n')) {
-          const t = line.trim();
-          if (!t) continue;
-          try { out.push(JSON.parse(t)); } catch { /* skip malformed */ }
-        }
-        return out;
-      }
-
-      let updates: unknown[] | null = null;
-      let sourceDir: string | null = null;
-
-      if (cwd) {
-        const dir = path.join(root, encodeURIComponent(cwd), sid);
-        updates = tryReadUpdates(dir);
-        if (updates) sourceDir = dir;
-      }
-      if (!updates) {
-        try {
-          const cwds = fs.readdirSync(root);
-          for (const enc of cwds) {
-            const dir = path.join(root, enc, sid);
-            const got = tryReadUpdates(dir);
-            if (got) { updates = got; sourceDir = dir; break; }
-          }
-        } catch { /* root may not exist yet */ }
-      }
-
-      if (!updates) {
-        sendJson(res, 404, {
-          ok: false, error: 'session dir not flushed yet', sessionId: sid,
-        });
-        return;
-      }
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store',
-      });
-      res.end(JSON.stringify({
-        ok: true,
-        sessionId: sid,
-        source: 'direct',
-        sourceDir,
-        updates,
-      }));
-      return;
-    }
-  }
-
   if (url === '/api/agents' && method === 'POST') {
     try {
       const body = (await readJsonBody(req) || {}) as Record<string, unknown>;
@@ -564,21 +470,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
       });
       res.end(sliced.text);
       return;
-    }
-    if (suffix === '/trace' && method === 'GET') {
-      try {
-        const data = await buildTrace(pub as never);
-        res.writeHead(200, {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Cache-Control': 'no-store',
-        });
-        res.end(JSON.stringify(data));
-        return;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        sendJson(res, 400, { ok: false, error: msg });
-        return;
-      }
     }
     if (suffix === '/files/raw' && (method === 'GET' || method === 'HEAD')) {
       handleFilesRaw(req, res, pub, method);
