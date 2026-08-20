@@ -626,10 +626,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
       res.end(sliced.text);
       return;
     }
-    if (suffix === '/files' && method === 'GET') {
-      handleFilesList(req, res, pub);
-      return;
-    }
     if (suffix === '/trace' && method === 'GET') {
       try {
         const data = await buildTrace(pub as never);
@@ -710,8 +706,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
   sendJson(res, 404, { ok: false, error: 'not found' });
 }
 
-const FILE_MAX_BYTES = 256_000;
-
 function withinAgentScope(scopeDir: string, target: string): boolean {
   const scope = path.resolve(scopeDir);
   const resolved = path.resolve(target);
@@ -719,141 +713,6 @@ function withinAgentScope(scopeDir: string, target: string): boolean {
 }
 
 function _req(req: IncomingMessage): IncomingMessage { return req; }
-
-function handleFilesList(req: IncomingMessage, res: ServerResponse, rec: PublicAgent): void {
-  const cwd = rec && rec.cwd;
-  if (!cwd) { sendJson(res, 404, { ok: false, error: 'agent cwd missing' }); return; }
-
-  const urlObj = new URL(req.url || '/', 'http://x');
-  const rel = urlObj.searchParams.get('path') || '';
-  const cleanRel = String(rel).replace(/^\/+/, '');
-
-  let target: string;
-  try {
-    target = path.resolve(cwd, cleanRel);
-  } catch {
-    sendJson(res, 400, { ok: false, error: 'invalid path' });
-    return;
-  }
-  if (!withinAgentScope(cwd, target)) {
-    sendJson(res, 400, { ok: false, error: 'path escapes agent scope' });
-    return;
-  }
-
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(target);
-  } catch (err) {
-    if (isNodeErr(err) && err.code === 'ENOENT') {
-      sendJson(res, 404, { ok: false, error: 'path not found' });
-      return;
-    }
-    const msg = err instanceof Error ? err.message : String(err);
-    sendJson(res, 500, { ok: false, error: msg });
-    return;
-  }
-
-  if (stat.isDirectory()) {
-    let names: string[];
-    try {
-      names = fs.readdirSync(target);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { ok: false, error: msg });
-      return;
-    }
-    interface DirEntry { name: string; type: 'directory'; entries: null; isHidden: boolean }
-    interface FileEntry { name: string; type: 'file'; size: number; mtime: string; isHidden: boolean }
-    const dirs: DirEntry[] = [];
-    const files: FileEntry[] = [];
-    for (const name of names) {
-      const full = path.join(target, name);
-      let s: fs.Stats;
-      try { s = fs.lstatSync(full); }
-      catch { continue; }
-      const isHidden = name.startsWith('.');
-      if (s.isDirectory()) {
-        dirs.push({ name, type: 'directory', entries: null, isHidden });
-      } else if (s.isFile()) {
-        files.push({
-          name,
-          type: 'file',
-          size: s.size,
-          mtime: s.mtime.toISOString(),
-          isHidden,
-        });
-      } else {
-        files.push({
-          name,
-          type: 'file',
-          size: s.size,
-          mtime: s.mtime.toISOString(),
-          isHidden,
-        });
-      }
-    }
-    const cmp = <T extends { isHidden: boolean; name: string }>(a: T, b: T): number => {
-      if (a.isHidden !== b.isHidden) return a.isHidden ? 1 : -1;
-      return a.name.localeCompare(b.name);
-    };
-    dirs.sort(cmp);
-    files.sort(cmp);
-    sendJson(res, 200, {
-      type: 'directory',
-      path: cleanRel,
-      entries: [...dirs, ...files],
-    });
-    return;
-  }
-
-  if (stat.isFile()) {
-    if (stat.size > FILE_MAX_BYTES) {
-      sendJson(res, 200, {
-        type: 'file',
-        path: cleanRel,
-        size: stat.size,
-        truncated: true,
-        content: null,
-        reason: 'too_large',
-      });
-      return;
-    }
-    let buf: Buffer;
-    try {
-      buf = fs.readFileSync(target);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { ok: false, error: msg });
-      return;
-    }
-    const sniff = buf.subarray(0, Math.min(512, buf.length));
-    let binary = false;
-    for (let i = 0; i < sniff.length; i++) {
-      if (sniff[i] === 0) { binary = true; break; }
-    }
-    if (binary) {
-      sendJson(res, 200, {
-        type: 'file',
-        path: cleanRel,
-        size: stat.size,
-        binary: true,
-        content: null,
-      });
-      return;
-    }
-    sendJson(res, 200, {
-      type: 'file',
-      path: cleanRel,
-      size: stat.size,
-      binary: false,
-      mtime: stat.mtime.toISOString(),
-      content: buf.toString('utf8'),
-    });
-    return;
-  }
-
-  sendJson(res, 400, { ok: false, error: 'unsupported file type' });
-}
 
 const RAW_MAX_BYTES = 200 * 1024 * 1024;
 

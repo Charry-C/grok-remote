@@ -453,7 +453,7 @@ pm2 startup           # 按它打印的命令做
 | GET | `/api/hello` | tailscale 身份 + 版本 |
 | GET | `/api/health` | 存活 |
 
-`GET /api/agents/:id/files`、`/trace`、后台终端等后端仍在，但手机 UI 不再暴露入口。
+`GET /api/agents/:id/files/raw` 仍给聊天图片附件用。`/trace`、后台终端等后端仍在，但手机 UI 不再暴露入口。目录浏览 `GET /api/agents/:id/files` 已删除。
 
 ---
 
