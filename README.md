@@ -442,6 +442,7 @@ pm2 startup           # 按它打印的命令做
 | POST | `/api/agents/:id/disconnect` | 杀 ACP，`wantedConnected: false` |
 | POST | `/api/agents/:id/model` | 换模型 / effort。409 if TUI |
 | GET | `/api/agents/:id/history` | NDJSON。`?turns=N` 或 `?all=1` |
+| GET | `/api/agents/:id/files/raw` | 聊天图片附件（`Range`） |
 | GET | `/api/agents/:id/stream` | 该会话 SSE |
 | GET | `/api/agents/stream` | 侧栏列表变更 SSE |
 | GET, POST, PATCH, DELETE | `/api/folders` | 文件夹 |
@@ -453,7 +454,6 @@ pm2 startup           # 按它打印的命令做
 | GET | `/api/hello` | tailscale 身份 + 版本 |
 | GET | `/api/health` | 存活 |
 
-`GET /api/agents/:id/files/raw` 仍给聊天图片附件用。目录浏览、`/trace` 与后台终端 HTTP 已删除。
 
 ---
 
