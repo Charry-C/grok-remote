@@ -105,11 +105,6 @@ export class ChatView {
   _activeTodoCard!: any;
   _autoScroll!: any;
   _autoScrollTools!: any;
-  _bgListViewerEl!: any;
-  _bgTermsByCard!: any;
-  _bgTermsTimer!: any;
-  _bgTermViewerEl!: any;
-  _bgTermViewerTimer!: any;
   _chatIntroAbort!: any;
   _chatIntroEl!: any;
   _composerEnabled!: any;
@@ -173,7 +168,6 @@ export class ChatView {
   activeTurn!: any;
   agentId!: any;
   availableCommands!: any;
-  bgTermsStripEl!: any;
   chatSplitEl!: any;
   composerAttachBtn!: any;
   composerAttachSlot!: any;
