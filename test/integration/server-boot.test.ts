@@ -48,22 +48,13 @@ test('integration: /api/hello reports app identity, node, and tailscale block', 
   }
 });
 
-test('integration: /api/version/current responds with a CurrentVersion shape', { skip: !ENABLED && SKIP_REASON }, async () => {
+test('integration: GET /api/version/current is gone', { skip: !ENABLED && SKIP_REASON }, async () => {
   let proc: ChildProcess | null = null;
   try {
     const s = await bootServer();
     proc = s.proc;
     const r = await fetch(`${s.base}/api/version/current`);
-    assert.equal(r.status, 200);
-    const body = await r.json() as {
-      ok?: boolean; version?: string; pkgVersion?: string;
-      gitSha?: string | null; gitBranch?: string | null;
-    };
-    assert.equal(body.ok, true);
-    assert.equal(typeof body.version, 'string');
-    assert.equal(typeof body.pkgVersion, 'string');
-    assert.ok(body.gitSha === null || typeof body.gitSha === 'string');
-    assert.ok(body.gitBranch === null || typeof body.gitBranch === 'string');
+    assert.equal(r.status, 404);
   } finally {
     await shutdown(proc);
   }

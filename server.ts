@@ -29,16 +29,6 @@ import { buildTrace, buildTraceForSessionId } from './lib/trace-host.js';
 import { handleSystem } from './lib/routes/system.js';
 import { listJoinedSystemSessions } from './lib/session-list.js';
 import { runGrokText, errorToResponse } from './lib/grok-cli.js';
-import {
-  readCurrentVersion,
-  readLatestVersion,
-  readDiff as readVersionDiff,
-  runUpdate as runVersionUpdate,
-  isUpdateInProgress,
-  readReleases,
-  type UpdateStepEvent,
-} from './lib/version-update.js';
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
 const DIST = path.join(ROOT, 'dist');
@@ -184,57 +174,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
 
   if (url === '/api/health' && method === 'GET') {
     sendJson(res, 200, { ok: true, version: APP_VERSION, uptime_seconds: Math.floor(process.uptime()) });
-    return;
-  }
-
-  if (url === '/api/version/current' && method === 'GET') {
-    try {
-      const data = await readCurrentVersion();
-      sendJson(res, 200, data);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { ok: false, error: msg });
-    }
-    return;
-  }
-  if (url === '/api/version/latest' && method === 'GET') {
-    try {
-      const data = await readLatestVersion();
-      sendJson(res, 200, data);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { ok: false, error: msg });
-    }
-    return;
-  }
-  if (url === '/api/version/diff' && method === 'GET') {
-    try {
-      const data = await readVersionDiff();
-      sendJson(res, 200, data);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { ok: false, error: msg });
-    }
-    return;
-  }
-  if ((url === '/api/version/releases' || url.startsWith('/api/version/releases?'))
-      && method === 'GET') {
-    try {
-      const force = /\bforce=1\b/.test(url);
-      const data = await readReleases({ force });
-      sendJson(res, 200, data);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { ok: false, error: msg });
-    }
-    return;
-  }
-  if (url === '/api/version/update' && method === 'POST') {
-    if (isUpdateInProgress()) {
-      sendJson(res, 409, { ok: false, error: 'update already in progress' });
-      return;
-    }
-    handleVersionUpdateStream(req, res);
     return;
   }
 
@@ -1084,45 +1023,6 @@ function handleTerminalKill(_req2: IncomingMessage, res: ServerResponse, rec: Pu
   bg.endedAt   = Date.now();
   try { manager.emit('list_changed', { event: 'bg_tasks', id: rec.id, count: 0 }); } catch { /* ignore */ }
   sendJson(res, 200, { ok: true, source: 'grok', killed: true });
-}
-
-function handleVersionUpdateStream(req: IncomingMessage, res: ServerResponse): void {
-  sseHeaders(res);
-  let counter = 0;
-  const send = (data: UpdateStepEvent): void => {
-    sseWrite(res, {
-      id: `vupd-${Date.now()}-${++counter}`,
-      event: 'update',
-      data,
-    });
-  };
-  send({ step: 'open', status: 'ok', detail: 'connected' });
-
-  const heartbeat = setInterval(() => ssePing(res), 5000);
-  let closed = false;
-  const cleanup = (): void => {
-    if (closed) return;
-    closed = true;
-    clearInterval(heartbeat);
-    if (!res.writableEnded) try { res.end(); } catch { /* ignore */ }
-  };
-  req.on('close', cleanup);
-  req.on('error', cleanup);
-
-  runVersionUpdate({
-    emit: (ev: UpdateStepEvent) => { if (!closed) send(ev); },
-  }).then(() => {
-    if (!closed) {
-      send({ step: 'done', status: 'ok', detail: 'all steps completed' });
-      cleanup();
-    }
-  }).catch((err: unknown) => {
-    if (!closed) {
-      const msg = err instanceof Error ? err.message : String(err);
-      send({ step: 'done', status: 'fail', detail: msg });
-      cleanup();
-    }
-  });
 }
 
 function handleAgentsStream(req: IncomingMessage, res: ServerResponse): void {
