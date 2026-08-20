@@ -26,7 +26,6 @@ import { resolveStartCwd } from './lib/history.js';
 import { writeHeaders as sseHeaders, writeEvent as sseWrite, writePing as ssePing } from './lib/sse.js';
 import { handleSystem } from './lib/routes/system.js';
 import { listJoinedSystemSessions } from './lib/session-list.js';
-import { runGrokText, errorToResponse } from './lib/grok-cli.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
 const DIST = path.join(ROOT, 'dist');
@@ -471,36 +470,6 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
     }
     if (suffix === '/stream' && method === 'GET') {
       handleStream(req, res, id);
-      return;
-    }
-    if (suffix === '/publish' && method === 'POST') {
-      const sessionId = pub.sessionId || pub.lastSessionId;
-      if (!sessionId) {
-        sendJson(res, 400, {
-          ok: false,
-          error: 'agent has no sessionId yet; complete at least one turn before publishing',
-        });
-        return;
-      }
-      try {
-        const stdout = await runGrokText(['share', sessionId], {
-          timeoutMs: 60_000,
-          maxBytes: 256 * 1024,
-        });
-        const m = stdout.match(/https?:\/\/\S+/);
-        const url2 = m ? m[0].replace(/[)\].,;]+$/, '') : null;
-        if (!url2) {
-          sendJson(res, 500, {
-            ok: false,
-            error: 'grok share did not print a URL',
-            stdout: stdout.slice(-2000),
-          });
-          return;
-        }
-        sendJson(res, 200, { ok: true, url: url2, sessionId, stdout });
-      } catch (err) {
-        sendJson(res, 500, errorToResponse(err));
-      }
       return;
     }
     sendJson(res, 404, { ok: false, error: 'not found' });
